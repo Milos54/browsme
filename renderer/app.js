@@ -354,30 +354,35 @@ function renderFiles(files) {
     item.dataset.name  = file.name;
     item.dataset.isDir = file.isDirectory;
 
-    const icon    = getFileIcon(file.name, file.isDirectory, file.isSymlink);
-    const sizeStr = file.isDirectory ? '' : formatSize(file.size);
-    const dateStr = file.mtime ? formatDate(file.mtime * 1000) : '';
+    const icon     = getFileIcon(file.name, file.isDirectory, file.isSymlink);
+    const sizeStr  = file.isDirectory ? '' : formatSize(file.size);
+    const dateStr  = file.mtime ? formatDate(file.mtime * 1000) : '';
+    const badgeHtml = file.linkedAs
+      ? file.linkedAs.map((lnk) => `<span class="file-badge${isProdLink(lnk) ? ' file-badge-prod' : ''}">\u2192 ${escHtml(lnk)}</span>`).join('')
+      : '';
 
     if (viewMode === 'list') {
       item.innerHTML = `
         <span class="fi-icon">${icon}</span>
-        <span class="fi-name" title="${escHtml(file.name)}">${escHtml(file.name)}</span>
+        <span class="fi-name" title="${escHtml(file.name)}">${escHtml(file.name)}${badgeHtml ? ' ' + badgeHtml : ''}</span>
         <span class="fi-size">${sizeStr}</span>
         <span class="fi-date">${dateStr}</span>
       `;
     } else {
       item.innerHTML = `
         <span class="fi-icon-large">${icon}</span>
+        ${badgeHtml ? `<span class="fi-badges">${badgeHtml}</span>` : ''}
         <span class="fi-name-grid" title="${escHtml(file.name)}">${escHtml(file.name)}</span>
       `;
     }
 
     if (file.isDirectory) {
+      // isDirectory is true for real dirs AND symlinks-to-dirs (resolved in main)
       item.addEventListener('dblclick', () => {
         const newPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
         loadDirectory(newPath);
       });
-    } else {
+    } else if (!file.isSymlink) {
       item.addEventListener('dblclick', () => {
         const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
         openPreview(filePath, file.name, file.size);
@@ -405,6 +410,11 @@ function setViewMode(mode) {
   $('btn-view-grid').classList.toggle('active', mode === 'grid');
   $('btn-view-list').classList.toggle('active', mode === 'list');
   renderFiles(currentFiles);
+}
+
+// Returns true if the symlink name looks production-related
+function isProdLink(name) {
+  return /^(prod|production|live|current|stable|release)$/i.test(name);
 }
 
 // ── File icons ─────────────────────────────────────────────────────────────────

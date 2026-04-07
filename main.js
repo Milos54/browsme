@@ -282,7 +282,7 @@ ipcMain.handle('ssh:readdir', (_event, { path: dirPath }) => {
       return;
     }
 
-    sftpSession.readdir(dirPath, (err, list) => {
+    sftpSession.readdir(dirPath, async (err, list) => {
       if (err) {
         resolve({ success: false, error: err.message });
         return;
@@ -296,16 +296,52 @@ ipcMain.handle('ssh:readdir', (_event, { path: dirPath }) => {
         .filter((item) => item.filename !== '.' && item.filename !== '..')
         .map((item) => ({
           name: item.filename,
-          isDirectory: item.attrs.mode
-            ? (item.attrs.mode & S_IFMT) === S_IFDIR
-            : false,
-          isSymlink: item.attrs.mode
-            ? (item.attrs.mode & S_IFMT) === S_IFLNK
-            : false,
-          size: item.attrs.size || 0,
-          mtime: item.attrs.mtime || 0,
-          permissions: item.attrs.mode || 0,
+          isDirectory: item.attrs.mode ? (item.attrs.mode & S_IFMT) === S_IFDIR : false,
+          isSymlink:   item.attrs.mode ? (item.attrs.mode & S_IFMT) === S_IFLNK : false,
+          size:        item.attrs.size  || 0,
+          mtime:       item.attrs.mtime || 0,
+          permissions: item.attrs.mode  || 0,
         }));
+
+      // ── Resolve symlinks ─────────────────────────────────────────────────
+      const symlinks = files.filter((f) => f.isSymlink);
+
+      if (symlinks.length > 0) {
+        const sftp = sftpSession; // capture in case it changes
+
+        await Promise.all(symlinks.map((sym) => {
+          const fullPath = dirPath === '/' ? `/${sym.name}` : `${dirPath}/${sym.name}`;
+          return new Promise((res) => {
+            // stat() follows the symlink → tells us if the target is a directory
+            sftp.stat(fullPath, (statErr, stats) => {
+              if (!statErr && stats && stats.mode) {
+                sym.isDirectory = (stats.mode & S_IFMT) === S_IFDIR;
+              }
+              // readlink() → gives us the raw target path
+              sftp.readlink(fullPath, (rlErr, target) => {
+                if (!rlErr && target) sym.symlinkTarget = target;
+                res();
+              });
+            });
+          });
+        }));
+
+        // Build map: target basename → [symlink names that point to it]
+        const linkedAs = {};
+        symlinks.forEach((sym) => {
+          if (!sym.symlinkTarget) return;
+          const targetName = sym.symlinkTarget.replace(/\/$/, '').split('/').pop();
+          if (targetName) {
+            if (!linkedAs[targetName]) linkedAs[targetName] = [];
+            linkedAs[targetName].push(sym.name);
+          }
+        });
+
+        // Annotate target folders with the symlink names pointing at them
+        files.forEach((f) => {
+          if (linkedAs[f.name]) f.linkedAs = linkedAs[f.name];
+        });
+      }
 
       files.sort((a, b) => {
         if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;

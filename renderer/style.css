@@ -871,6 +871,37 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   margin: 0;
 }
 
+/* ── Symlink badges ─────────────────────────────────────────────────────────── */
+.file-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  background: rgba(139, 148, 158, 0.12);
+  border: 1px solid rgba(139, 148, 158, 0.3);
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+  vertical-align: middle;
+  line-height: 1.6;
+}
+
+.file-badge-prod {
+  background: rgba(63, 185, 80, 0.12);
+  border-color: rgba(63, 185, 80, 0.4);
+  color: #3fb950;
+}
+
+/* Badge row in grid view */
+.fi-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 3px;
+  margin-bottom: 1px;
+}
+
 /* JSON syntax colours */
 .jk  { color: #79c0ff; }   /* key */
 .js  { color: #a5d6ff; }   /* string value */
