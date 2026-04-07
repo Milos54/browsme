@@ -232,6 +232,48 @@ ipcMain.handle('ssh:hop', (_event, { host, port, username, password }) => {
   });
 });
 
+// ── SSH: Rename ───────────────────────────────────────────────────────────────
+ipcMain.handle('ssh:rename', (_event, { oldPath, newPath }) => {
+  return new Promise((resolve) => {
+    if (!sftpSession) { resolve({ success: false, error: 'Not connected' }); return; }
+    sftpSession.rename(oldPath, newPath, (err) => {
+      if (err) resolve({ success: false, error: err.message });
+      else resolve({ success: true });
+    });
+  });
+});
+
+// ── SSH: Delete (try normal first, report if sudo needed) ─────────────────────
+function runExec(cmd, stdinData) {
+  return new Promise((resolve) => {
+    if (!sshClient) { resolve({ code: -1, stdout: '', stderr: 'Not connected' }); return; }
+    sshClient.exec(cmd, (err, stream) => {
+      if (err) { resolve({ code: -1, stdout: '', stderr: err.message }); return; }
+      let stdout = '', stderr = '';
+      stream.on('data', (d) => { stdout += d.toString(); });
+      stream.stderr.on('data', (d) => { stderr += d.toString(); });
+      if (stdinData !== undefined) { stream.write(stdinData + '\n'); stream.end(); }
+      stream.on('close', (code) => resolve({ code, stdout, stderr }));
+    });
+  });
+}
+
+function escapeSh(p) { return "'" + p.replace(/'/g, "'\\''") + "'"; }
+
+ipcMain.handle('ssh:delete', async (_event, { path: targetPath }) => {
+  const { code, stderr } = await runExec(`rm -rf ${escapeSh(targetPath)}`);
+  if (code === 0) return { success: true };
+  const isPermission = /Permission denied|Operation not permitted|cannot remove/i.test(stderr);
+  return { success: false, needsSudo: isPermission, error: stderr.trim() || `Exit code ${code}` };
+});
+
+ipcMain.handle('ssh:delete-sudo', async (_event, { path: targetPath, password: sudoPass }) => {
+  const { code, stderr } = await runExec(`sudo -S rm -rf ${escapeSh(targetPath)}`, sudoPass);
+  if (code === 0) return { success: true };
+  const wrongPass = /incorrect password|Sorry|try again/i.test(stderr);
+  return { success: false, wrongPassword: wrongPass, error: stderr.trim() || `Exit code ${code}` };
+});
+
 // ── SSH: Read directory ───────────────────────────────────────────────────────
 ipcMain.handle('ssh:readdir', (_event, { path: dirPath }) => {
   return new Promise((resolve) => {

@@ -154,6 +154,70 @@
 
   </div>
 
+  <!-- ── Right-click Context Menu ────────────────────────────────────────── -->
+  <div id="ctx-menu" class="ctx-menu hidden">
+    <button id="ctx-rename" class="ctx-item">✏️ Rename</button>
+    <div class="ctx-sep"></div>
+    <button id="ctx-delete" class="ctx-item ctx-danger">🗑️ Delete</button>
+  </div>
+
+  <!-- ── Rename Modal ──────────────────────────────────────────────────────── -->
+  <div id="rename-backdrop" class="confirm-backdrop hidden">
+    <div class="confirm-modal">
+      <div class="confirm-icon">✏️</div>
+      <div class="confirm-title">Rename</div>
+      <div class="field-group" style="text-align:left; margin-top:4px">
+        <label for="rename-input">New name</label>
+        <input id="rename-input" type="text" spellcheck="false" />
+      </div>
+      <div id="rename-error" class="error-msg hidden"></div>
+      <div class="confirm-btns" style="margin-top:20px">
+        <button id="rename-cancel" class="confirm-btn-cancel">Cancel</button>
+        <button id="rename-ok"     class="confirm-btn-save">
+          <span id="rename-ok-text">Rename</span>
+          <span id="rename-spinner" class="spinner hidden"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Delete Confirmation Modal ────────────────────────────────────────── -->
+  <div id="confirm-backdrop" class="confirm-backdrop hidden">
+    <div class="confirm-modal">
+      <div class="confirm-icon">🗑️</div>
+      <div class="confirm-title">Delete "<span id="confirm-name"></span>"?</div>
+      <div class="confirm-msg">This action <strong>cannot be undone</strong>. The item will be permanently removed from the server.</div>
+      <div class="confirm-btns">
+        <button id="confirm-cancel" class="confirm-btn-cancel">Cancel</button>
+        <button id="confirm-ok"     class="confirm-btn-delete">
+          <span id="confirm-ok-text">Delete</span>
+          <span id="confirm-spinner" class="spinner hidden"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Sudo Password Modal ───────────────────────────────────────────────── -->
+  <div id="sudo-backdrop" class="confirm-backdrop hidden">
+    <div class="confirm-modal">
+      <div class="confirm-icon">🔐</div>
+      <div class="confirm-title">Permission Denied</div>
+      <div class="confirm-msg">Deleting "<span id="sudo-item-name"></span>" requires elevated privileges.</div>
+      <div class="field-group" style="margin-top:16px">
+        <label for="sudo-pass-input">sudo password</label>
+        <input id="sudo-pass-input" type="password" placeholder="••••••••" />
+      </div>
+      <div id="sudo-error" class="error-msg hidden"></div>
+      <div class="confirm-btns">
+        <button id="sudo-cancel" class="confirm-btn-cancel">Cancel</button>
+        <button id="sudo-ok"     class="confirm-btn-delete">
+          <span id="sudo-ok-text">Delete with sudo</span>
+          <span id="sudo-spinner" class="spinner hidden"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Hop Modal ───────────────────────────────────────────────────────── -->
   <div id="hop-backdrop" class="hop-backdrop hidden">
     <div class="hop-modal">

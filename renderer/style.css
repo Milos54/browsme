@@ -580,6 +580,137 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
 /* ── Animations ─────────────────────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Right-click Context Menu ───────────────────────────────────────────────── */
+.ctx-menu {
+  position: fixed;
+  z-index: 300;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  min-width: 150px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.ctx-item {
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.1s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-item:hover  { background: var(--surface); }
+.ctx-danger       { color: var(--danger) !important; }
+.ctx-danger:hover { background: rgba(255, 123, 114, 0.12) !important; }
+
+.ctx-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+/* ── Confirm / Sudo Modals ──────────────────────────────────────────────────── */
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 250;
+  padding: 32px;
+  backdrop-filter: blur(2px);
+}
+
+.confirm-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 28px 24px;
+  width: 100%;
+  max-width: 360px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.confirm-icon  { font-size: 36px; margin-bottom: 12px; }
+
+.confirm-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+
+.confirm-msg {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-bottom: 24px;
+}
+.confirm-msg strong { color: var(--text); }
+
+.confirm-btns {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.confirm-btn-cancel {
+  padding: 8px 20px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.confirm-btn-cancel:hover { background: var(--border); }
+
+.confirm-btn-delete {
+  padding: 8px 20px;
+  background: rgba(255, 123, 114, 0.15);
+  border: 1px solid rgba(255, 123, 114, 0.4);
+  border-radius: var(--radius-sm);
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.12s;
+}
+.confirm-btn-delete:hover    { background: rgba(255, 123, 114, 0.25); }
+.confirm-btn-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.confirm-btn-save {
+  padding: 8px 20px;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-sm);
+  color: #0d1117;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.12s;
+}
+.confirm-btn-save:hover    { background: var(--accent-h); }
+.confirm-btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ── Hop Modal ──────────────────────────────────────────────────────────────── */
 .hop-backdrop {
   position: fixed;

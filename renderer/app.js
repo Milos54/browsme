@@ -69,8 +69,31 @@ function bindExplorerControls() {
     if (e.target === $('preview-backdrop')) closePreview();
   });
 
+  // Context menu
+  document.addEventListener('click',       hideCtxMenu);
+  document.addEventListener('contextmenu', (e) => e.preventDefault()); // block default
+  $('ctx-rename').addEventListener('click', () => { hideCtxMenu(); startRename(); });
+  $('ctx-delete').addEventListener('click', () => { hideCtxMenu(); startDelete(); });
+
+  // Rename modal
+  $('rename-cancel').addEventListener('click', closeRename);
+  $('rename-backdrop').addEventListener('click', (e) => { if (e.target === $('rename-backdrop')) closeRename(); });
+  $('rename-ok').addEventListener('click', runRename);
+  $('rename-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runRename(); });
+
+  // Confirm modal
+  $('confirm-cancel').addEventListener('click', closeConfirm);
+  $('confirm-backdrop').addEventListener('click', (e) => { if (e.target === $('confirm-backdrop')) closeConfirm(); });
+  $('confirm-ok').addEventListener('click', runDelete);
+
+  // Sudo modal
+  $('sudo-cancel').addEventListener('click', closeSudo);
+  $('sudo-backdrop').addEventListener('click', (e) => { if (e.target === $('sudo-backdrop')) closeSudo(); });
+  $('sudo-ok').addEventListener('click', runDeleteSudo);
+  $('sudo-pass-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runDeleteSudo(); });
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closePreview(); closeHopModal(); }
+    if (e.key === 'Escape') { closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename(); }
   });
 }
 
@@ -366,6 +389,13 @@ function renderFiles(files) {
       item.classList.add('selected');
     });
 
+    item.addEventListener('contextmenu', (e) => {
+      e.stopPropagation();
+      container.querySelectorAll('.file-item.selected').forEach((el) => el.classList.remove('selected'));
+      item.classList.add('selected');
+      showCtxMenu(e.clientX, e.clientY, file);
+    });
+
     container.appendChild(item);
   });
 }
@@ -515,6 +545,184 @@ function highlightJson(json) {
       return `<span class="ji">${match}</span>`;                             // number
     }
   );
+}
+
+// ── Rename ─────────────────────────────────────────────────────────────────────
+function startRename() {
+  if (!ctxTarget) return;
+  $('rename-input').value = ctxTarget.name;
+  $('rename-error').classList.add('hidden');
+  $('rename-ok').disabled = false;
+  $('rename-ok-text').textContent = 'Rename';
+  $('rename-spinner').classList.add('hidden');
+  $('rename-backdrop').classList.remove('hidden');
+  // Select the name without extension for easy editing
+  const input = $('rename-input');
+  setTimeout(() => {
+    input.focus();
+    const dotIdx = ctxTarget.isDirectory ? -1 : ctxTarget.name.lastIndexOf('.');
+    input.setSelectionRange(0, dotIdx > 0 ? dotIdx : ctxTarget.name.length);
+  }, 50);
+}
+
+function closeRename() {
+  $('rename-backdrop').classList.add('hidden');
+}
+
+async function runRename() {
+  if (!ctxTarget) return;
+  const newName = $('rename-input').value.trim();
+
+  if (!newName) {
+    $('rename-error').textContent = 'Name cannot be empty.';
+    $('rename-error').classList.remove('hidden');
+    return;
+  }
+  if (newName === ctxTarget.name) { closeRename(); return; }
+  if (newName.includes('/')) {
+    $('rename-error').textContent = 'Name cannot contain slashes.';
+    $('rename-error').classList.remove('hidden');
+    return;
+  }
+
+  $('rename-ok').disabled = true;
+  $('rename-ok-text').textContent = 'Renaming…';
+  $('rename-spinner').classList.remove('hidden');
+  $('rename-error').classList.add('hidden');
+
+  const dir     = currentPath === '/' ? '' : currentPath;
+  const newPath = `${dir}/${newName}`;
+  const result  = await window.api.rename(ctxTarget.fullPath, newPath);
+
+  $('rename-ok').disabled = false;
+  $('rename-ok-text').textContent = 'Rename';
+  $('rename-spinner').classList.add('hidden');
+
+  if (!result.success) {
+    $('rename-error').textContent = result.error || 'Rename failed.';
+    $('rename-error').classList.remove('hidden');
+    return;
+  }
+
+  closeRename();
+  loadDirectory(currentPath, false);
+}
+
+// ── Context Menu ───────────────────────────────────────────────────────────────
+let ctxTarget = null; // { name, isDirectory, fullPath }
+
+function showCtxMenu(x, y, file) {
+  ctxTarget = {
+    name: file.name,
+    isDirectory: file.isDirectory,
+    fullPath: currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`,
+  };
+  const menu = $('ctx-menu');
+  menu.classList.remove('hidden');
+
+  // Keep menu inside viewport
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const mw = 160, mh = 40;
+  menu.style.left = (x + mw > vw ? vw - mw - 8 : x) + 'px';
+  menu.style.top  = (y + mh > vh ? y - mh : y) + 'px';
+}
+
+function hideCtxMenu() {
+  $('ctx-menu').classList.add('hidden');
+}
+
+// ── Delete flow ────────────────────────────────────────────────────────────────
+function startDelete() {
+  if (!ctxTarget) return;
+  $('confirm-name').textContent = ctxTarget.name;
+  $('confirm-ok-text').textContent = 'Delete';
+  $('confirm-spinner').classList.add('hidden');
+  $('confirm-ok').disabled = false;
+  $('confirm-backdrop').classList.remove('hidden');
+}
+
+function closeConfirm() {
+  $('confirm-backdrop').classList.add('hidden');
+}
+
+async function runDelete() {
+  if (!ctxTarget) return;
+  $('confirm-ok').disabled    = true;
+  $('confirm-ok-text').textContent = 'Deleting…';
+  $('confirm-spinner').classList.remove('hidden');
+
+  const result = await window.api.delete(ctxTarget.fullPath);
+
+  $('confirm-ok').disabled    = false;
+  $('confirm-ok-text').textContent = 'Delete';
+  $('confirm-spinner').classList.add('hidden');
+  closeConfirm();
+
+  if (result.success) {
+    loadDirectory(currentPath, false);
+    return;
+  }
+
+  if (result.needsSudo) {
+    openSudoModal();
+    return;
+  }
+
+  // Generic error — show briefly in status bar
+  $('status-items').textContent = `⚠ ${result.error}`;
+  setTimeout(() => {
+    $('status-items').textContent = `${currentFiles.length} items`;
+  }, 4000);
+}
+
+function openSudoModal() {
+  $('sudo-item-name').textContent = ctxTarget ? ctxTarget.name : '';
+  $('sudo-pass-input').value = '';
+  $('sudo-error').classList.add('hidden');
+  $('sudo-ok').disabled = false;
+  $('sudo-ok-text').textContent = 'Delete with sudo';
+  $('sudo-spinner').classList.add('hidden');
+  $('sudo-backdrop').classList.remove('hidden');
+  setTimeout(() => $('sudo-pass-input').focus(), 50);
+}
+
+function closeSudo() {
+  $('sudo-backdrop').classList.add('hidden');
+  $('sudo-pass-input').value = '';
+}
+
+async function runDeleteSudo() {
+  if (!ctxTarget) return;
+  const pass = $('sudo-pass-input').value;
+  if (!pass) {
+    $('sudo-error').textContent = 'Please enter the sudo password.';
+    $('sudo-error').classList.remove('hidden');
+    return;
+  }
+
+  $('sudo-ok').disabled = true;
+  $('sudo-ok-text').textContent = 'Deleting…';
+  $('sudo-spinner').classList.remove('hidden');
+  $('sudo-error').classList.add('hidden');
+
+  const result = await window.api.deleteSudo(ctxTarget.fullPath, pass);
+
+  $('sudo-ok').disabled = false;
+  $('sudo-ok-text').textContent = 'Delete with sudo';
+  $('sudo-spinner').classList.add('hidden');
+
+  if (result.success) {
+    closeSudo();
+    loadDirectory(currentPath, false);
+    return;
+  }
+
+  $('sudo-error').textContent = result.wrongPassword
+    ? 'Incorrect sudo password. Try again.'
+    : (result.error || 'Delete failed.');
+  $('sudo-error').classList.remove('hidden');
+  $('sudo-pass-input').value = '';
+  $('sudo-pass-input').focus();
 }
 
 // Close preview
