@@ -905,6 +905,117 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   margin: 0;
 }
 
+/* ── Docker dropdown ────────────────────────────────────────────────────────── */
+.docker-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.docker-btn {
+  padding: 5px 11px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.docker-btn:hover { background: var(--surface2); color: var(--text); }
+
+.docker-exit-btn {
+  padding: 5px 11px;
+  background: rgba(240, 180, 41, 0.1);
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  border-radius: var(--radius-sm);
+  color: #f0b429;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+.docker-exit-btn:hover { background: rgba(240, 180, 41, 0.2); }
+
+.docker-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+  z-index: 150;
+  overflow: hidden;
+}
+
+.docker-dropdown-hdr {
+  padding: 10px 14px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+.docker-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+.docker-list::-webkit-scrollbar { width: 6px; }
+.docker-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.docker-loading, .docker-empty, .docker-error {
+  padding: 20px 14px;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: center;
+}
+.docker-error { color: var(--danger); }
+
+.docker-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+.docker-row:last-child { border-bottom: none; }
+.docker-row:hover { background: var(--surface2); }
+
+.docker-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-running { background: #3fb950; box-shadow: 0 0 5px #3fb950; }
+.dot-stopped { background: var(--text-dim); }
+
+.docker-row-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.docker-row-name  { font-size: 13px; font-weight: 600; color: var(--text); }
+.docker-row-image { font-size: 11px; color: var(--text-dim); font-family: monospace; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.docker-row-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ── Drag-over overlay ──────────────────────────────────────────────────────── */
 .drag-overlay {
   position: absolute;

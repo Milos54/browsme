@@ -368,6 +368,166 @@ ipcMain.handle('ssh:readdir', (_event, { path: dirPath }) => {
   });
 });
 
+// ── Docker helpers ────────────────────────────────────────────────────────────
+
+// Parse `ls -la` output — works on GNU coreutils, busybox, Alpine, Debian, etc.
+function parseLsLa(output) {
+  const files = [];
+
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('total')) continue;
+
+    // Split on whitespace — max 9 fields, remainder is the filename
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 9) continue;
+
+    const perms = parts[0];
+    const type  = perms[0]; // d=dir, l=link, -=file, c/b/p=special
+    if (type === '?' || type === 'total') continue;
+
+    const size = parseInt(parts[4]) || 0;
+    // Date fields: month(5), day(6), time-or-year(7) → name starts at index 8
+    const rawName = parts.slice(8).join(' ');
+    if (rawName === '.' || rawName === '..') continue;
+
+    const isDirectory = type === 'd';
+    const isSymlink   = type === 'l';
+
+    // Symlinks: "linkname -> target" — keep only the link name
+    const name = isSymlink && rawName.includes(' -> ')
+      ? rawName.split(' -> ')[0]
+      : rawName;
+
+    files.push({ name, isDirectory, isSymlink, size, mtime: 0 });
+  }
+
+  files.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+  return files;
+}
+
+// ── Docker: list containers ───────────────────────────────────────────────────
+ipcMain.handle('ssh:docker-containers', async () => {
+  const { code, stdout, stderr } = await runExec(
+    'docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"'
+  );
+  if (code !== 0) return { success: false, error: stderr.trim() || 'docker ps failed — is Docker installed?' };
+
+  const containers = stdout
+    .trim()
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((line) => {
+      const [id, name, image, ...statusParts] = line.split('\t');
+      const status = statusParts.join('\t');
+      return { id, name, image, status, running: /^up /i.test(status) };
+    });
+
+  return { success: true, containers };
+});
+
+// ── Docker: read directory ────────────────────────────────────────────────────
+ipcMain.handle('ssh:docker-readdir', async (_event, { containerId, path: dirPath }) => {
+  // Use `ls -la` — available on every container (GNU, busybox/Alpine, etc.)
+  // Pass through `sh -c` so special characters in path are handled safely.
+  const cmd = `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`ls -la ${escapeSh(dirPath)}`)}`;
+  let { code, stdout, stderr } = await runExec(cmd);
+
+  // Fallback: some containers have sh elsewhere or ls not at /bin/ls
+  if (code !== 0 || !stdout.trim()) {
+    const fallback = await runExec(`docker exec ${escapeSh(containerId)} ls -la ${escapeSh(dirPath)}`);
+    if (fallback.stdout.trim()) { stdout = fallback.stdout; code = fallback.code; stderr = fallback.stderr; }
+  }
+
+  if (!stdout.trim()) {
+    return { success: false, error: (stderr || '').trim() || 'Directory appears empty or command failed inside container.' };
+  }
+
+  return { success: true, files: parseLsLa(stdout) };
+});
+
+// ── Docker: read file ─────────────────────────────────────────────────────────
+ipcMain.handle('ssh:docker-readfile', async (_event, { containerId, path: filePath }) => {
+  // Check size via wc -c (universally available, no need for stat)
+  const { stdout: sizeOut } = await runExec(
+    `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`wc -c < ${escapeSh(filePath)}`)}`
+  );
+  const size = parseInt(sizeOut.trim()) || 0;
+  if (size > 1024 * 1024) {
+    return { success: false, error: `File is too large to preview (${(size / 1024 / 1024).toFixed(1)} MB). Limit is 1 MB.` };
+  }
+
+  const { code, stdout, stderr } = await runExec(
+    `docker exec ${escapeSh(containerId)} cat ${escapeSh(filePath)}`
+  );
+  if (code !== 0) return { success: false, error: stderr.trim() || 'Cannot read file' };
+
+  // Binary check
+  if (stdout.includes('\x00')) return { success: false, error: 'Binary file — cannot preview.' };
+
+  return { success: true, content: stdout, size };
+});
+
+// ── Docker: delete ────────────────────────────────────────────────────────────
+ipcMain.handle('ssh:docker-delete', async (_event, { containerId, path: targetPath }) => {
+  const { code, stderr } = await runExec(
+    `docker exec ${escapeSh(containerId)} rm -rf ${escapeSh(targetPath)}`
+  );
+  if (code === 0) return { success: true };
+  return { success: false, error: stderr.trim() || `Exit code ${code}` };
+});
+
+// ── Docker: rename ────────────────────────────────────────────────────────────
+ipcMain.handle('ssh:docker-rename', async (_event, { containerId, oldPath, newPath }) => {
+  const { code, stderr } = await runExec(
+    `docker exec ${escapeSh(containerId)} mv ${escapeSh(oldPath)} ${escapeSh(newPath)}`
+  );
+  if (code === 0) return { success: true };
+  return { success: false, error: stderr.trim() || `Exit code ${code}` };
+});
+
+// ── Docker: upload file (desktop → server temp → docker cp → container) ───────
+ipcMain.handle('ssh:docker-upload', (_event, { localPath, containerId, containerDir }) => {
+  return new Promise(async (resolve) => {
+    if (!sftpSession) { resolve({ success: false, error: 'Not connected' }); return; }
+
+    const filename = require('path').basename(localPath);
+    const tmpPath  = `/tmp/.ssh-explorer-${Date.now()}-${filename}`;
+
+    // Step 1 — upload local file to server /tmp via SFTP (with progress)
+    try {
+      await new Promise((res, rej) => {
+        sftpSession.fastPut(localPath, tmpPath, {
+          step: (transferred, _chunk, total) => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('upload:progress', { localPath, transferred, total });
+            }
+          },
+        }, (err) => err ? rej(err) : res());
+      });
+    } catch (err) {
+      resolve({ success: false, error: `Upload to server failed: ${err.message}` });
+      return;
+    }
+
+    // Step 2 — docker cp from server temp to container
+    const dest = `${containerId}:${containerDir.replace(/\/$/, '')}/${filename}`;
+    const { code, stderr } = await runExec(`docker cp ${escapeSh(tmpPath)} ${escapeSh(dest)}`);
+
+    // Step 3 — clean up temp file regardless of outcome
+    await runExec(`rm -f ${escapeSh(tmpPath)}`);
+
+    if (code !== 0) {
+      resolve({ success: false, error: stderr.trim() || 'docker cp failed' });
+    } else {
+      resolve({ success: true });
+    }
+  });
+});
+
 // ── SSH: Upload file ──────────────────────────────────────────────────────────
 ipcMain.handle('ssh:upload', (_event, { localPath, remotePath }) => {
   return new Promise((resolve) => {

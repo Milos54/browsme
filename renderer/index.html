@@ -122,6 +122,19 @@
         <button id="btn-paste" class="paste-btn hidden" title="Paste copied item here">📋 <span id="paste-label"></span></button>
         <button id="btn-paste-clear" class="paste-clear-btn hidden" title="Clear clipboard">&#x2715;</button>
         <div id="paste-sep" class="toolbar-sep hidden"></div>
+        <!-- Docker dropdown -->
+        <div class="docker-wrap" id="docker-wrap">
+          <button id="btn-docker" class="docker-btn" title="Browse Docker containers on this server">🐳 Docker &#x25BE;</button>
+          <div id="docker-dropdown" class="docker-dropdown hidden">
+            <div class="docker-dropdown-hdr">Containers</div>
+            <div id="docker-list" class="docker-list">
+              <div class="docker-loading">Loading…</div>
+            </div>
+          </div>
+        </div>
+        <!-- Exit container (shown in docker mode) -->
+        <button id="btn-docker-exit" class="docker-exit-btn hidden" title="Exit container and return to server filesystem">&#x2190; Exit container</button>
+
         <button id="btn-hop" class="hop-btn" title="Connect to another server through current connection">&#x21D2; Connect to server</button>
         <div class="toolbar-sep"></div>
         <button id="btn-disconnect" class="disconnect-btn">&#x23FB; Disconnect</button>

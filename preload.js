@@ -12,6 +12,14 @@ contextBridge.exposeInMainWorld('api', {
   disconnect: ()      => ipcRenderer.invoke('ssh:disconnect'),
   hop:        (opts)  => ipcRenderer.invoke('ssh:hop', opts),
   rename:     (oldPath, newPath) => ipcRenderer.invoke('ssh:rename', { oldPath, newPath }),
+
+  // Docker
+  dockerUpload:     (localPath, containerId, containerDir) => ipcRenderer.invoke('ssh:docker-upload', { localPath, containerId, containerDir }),
+  dockerContainers: ()                          => ipcRenderer.invoke('ssh:docker-containers'),
+  dockerReaddir:    (containerId, path)         => ipcRenderer.invoke('ssh:docker-readdir',  { containerId, path }),
+  dockerReadfile:   (containerId, path)         => ipcRenderer.invoke('ssh:docker-readfile', { containerId, path }),
+  dockerDelete:     (containerId, path)         => ipcRenderer.invoke('ssh:docker-delete',   { containerId, path }),
+  dockerRename:     (containerId, old, newPath) => ipcRenderer.invoke('ssh:docker-rename',   { containerId, oldPath: old, newPath }),
   copy:       (srcPath, dstPath)           => ipcRenderer.invoke('ssh:copy',       { srcPath, dstPath }),
   copySudo:   (srcPath, dstPath, password) => ipcRenderer.invoke('ssh:copy-sudo',  { srcPath, dstPath, password }),
   delete:     (path)  => ipcRenderer.invoke('ssh:delete', { path }),

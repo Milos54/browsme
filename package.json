@@ -3,16 +3,46 @@
   "version": "1.0.0",
   "description": "Electron SSH file explorer — browse remote servers like Windows Explorer",
   "main": "main.js",
+  "author": "SSH Explorer",
+  "license": "ISC",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder --win --x64"
   },
   "keywords": ["ssh", "sftp", "electron", "file-explorer"],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "ssh2": "^1.16.0"
   },
   "devDependencies": {
-    "electron": "^35.1.2"
+    "electron": "^35.1.2",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.sshexplorer.app",
+    "productName": "SSH Explorer",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "package.json",
+      "node_modules/**"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis",     "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SSH Explorer"
+    }
   }
 }

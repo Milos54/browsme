@@ -64,6 +64,14 @@ function bindExplorerControls() {
   $('btn-view-list').addEventListener('click', () => setViewMode('list'));
   $('btn-hop').addEventListener('click', openHopModal);
 
+  // Docker
+  $('btn-docker').addEventListener('click', toggleDockerDropdown);
+  $('btn-docker-exit').addEventListener('click', exitDockerMode);
+  document.addEventListener('click', (e) => {
+    const wrap = document.querySelector('.docker-wrap');
+    if (wrap && !wrap.contains(e.target)) closeDockerDropdown();
+  });
+
   // Drag & drop upload
   const fileArea = $('file-area');
   let dragCounter = 0;
@@ -297,7 +305,9 @@ async function loadDirectory(dirPath, pushHistory = true) {
   hideFileError();
   $('empty-msg').classList.add('hidden');
 
-  const result = await window.api.readdir(dirPath);
+  const result = dockerMode
+    ? await window.api.dockerReaddir(dockerMode.id, dirPath)
+    : await window.api.readdir(dirPath);
 
   setLoading(false);
   isLoading = false;
@@ -555,7 +565,9 @@ async function openPreview(filePath, fileName, fileSize) {
   content.classList.add('hidden');
   backdrop.classList.remove('hidden');
 
-  const result = await window.api.readfile(filePath);
+  const result = dockerMode
+    ? await window.api.dockerReadfile(dockerMode.id, filePath)
+    : await window.api.readfile(filePath);
 
   loading.classList.add('hidden');
 
@@ -642,7 +654,9 @@ async function runRename() {
 
   const dir     = currentPath === '/' ? '' : currentPath;
   const newPath = `${dir}/${newName}`;
-  const result  = await window.api.rename(ctxTarget.fullPath, newPath);
+  const result  = dockerMode
+    ? await window.api.dockerRename(dockerMode.id, ctxTarget.fullPath, newPath)
+    : await window.api.rename(ctxTarget.fullPath, newPath);
 
   $('rename-ok').disabled = false;
   $('rename-ok-text').textContent = 'Rename';
@@ -656,6 +670,99 @@ async function runRename() {
 
   closeRename();
   loadDirectory(currentPath, false);
+}
+
+// ── Docker mode ────────────────────────────────────────────────────────────────
+let dockerMode      = null;   // null | { id, name, image }
+let preDockerPath   = '/';    // SFTP path to return to after exiting container
+let dockerDropdownOpen = false;
+
+async function toggleDockerDropdown() {
+  if (dockerDropdownOpen) { closeDockerDropdown(); return; }
+  openDockerDropdown();
+}
+
+function openDockerDropdown() {
+  dockerDropdownOpen = true;
+  $('docker-dropdown').classList.remove('hidden');
+  $('docker-list').innerHTML = '<div class="docker-loading">Loading…</div>';
+  fetchContainers();
+}
+
+function closeDockerDropdown() {
+  dockerDropdownOpen = false;
+  $('docker-dropdown').classList.add('hidden');
+}
+
+async function fetchContainers() {
+  const result = await window.api.dockerContainers();
+  if (!result.success) {
+    $('docker-list').innerHTML = `<div class="docker-error">${escHtml(result.error)}</div>`;
+    return;
+  }
+  if (result.containers.length === 0) {
+    $('docker-list').innerHTML = '<div class="docker-empty">No containers found</div>';
+    return;
+  }
+
+  $('docker-list').innerHTML = '';
+  result.containers.forEach((c) => {
+    const row = document.createElement('button');
+    row.className = 'docker-row';
+    row.innerHTML = `
+      <span class="docker-status-dot ${c.running ? 'dot-running' : 'dot-stopped'}"></span>
+      <span class="docker-row-info">
+        <span class="docker-row-name">${escHtml(c.name)}</span>
+        <span class="docker-row-image">${escHtml(c.image)}</span>
+      </span>
+      <span class="docker-row-status">${escHtml(c.status)}</span>
+    `;
+    row.addEventListener('click', () => {
+      closeDockerDropdown();
+      if (!c.running) {
+        $('status-items').textContent = `⚠ Container "${c.name}" is not running`;
+        setTimeout(() => $('status-items').textContent = '', 4000);
+        return;
+      }
+      enterDockerMode(c);
+    });
+    $('docker-list').appendChild(row);
+  });
+}
+
+async function enterDockerMode(container) {
+  preDockerPath = currentPath;
+  dockerMode    = { id: container.id, name: container.name, image: container.image };
+
+  // Update UI
+  $('btn-docker').classList.add('hidden');
+  $('btn-docker-exit').classList.remove('hidden');
+  $('btn-paste').classList.add('hidden');
+  $('btn-paste-clear').classList.add('hidden');
+  $('paste-sep').classList.add('hidden');
+
+  const label = `${connectionInfo ? connectionInfo.username + '@' + connectionInfo.host + ' ' : ''}[🐳 ${container.name}]`;
+  $('titlebar-title').textContent    = `SSH Explorer — ${label}`;
+  $('status-connection').textContent = `🐳 ${container.name}  (${container.image})`;
+
+  navHistory   = [];
+  historyIndex = -1;
+  await loadDirectory('/', true);
+}
+
+function exitDockerMode() {
+  dockerMode = null;
+  $('btn-docker').classList.remove('hidden');
+  $('btn-docker-exit').classList.add('hidden');
+
+  const info = connectionInfo;
+  const connLabel = info ? `${info.username}@${info.host}` : '';
+  $('titlebar-title').textContent    = `SSH Explorer — ${connLabel}`;
+  $('status-connection').textContent = `Connected: ${connLabel}`;
+
+  navHistory   = [];
+  historyIndex = -1;
+  loadDirectory(preDockerPath, true);
 }
 
 // ── Clipboard (server-side copy) ───────────────────────────────────────────────
@@ -759,9 +866,11 @@ async function runDelete() {
   $('confirm-ok-text').textContent = 'Deleting…';
   $('confirm-spinner').classList.remove('hidden');
 
-  const result = await window.api.delete(ctxTarget.fullPath);
+  const result = dockerMode
+    ? await window.api.dockerDelete(dockerMode.id, ctxTarget.fullPath)
+    : await window.api.delete(ctxTarget.fullPath);
 
-  $('confirm-ok').disabled    = false;
+  $('confirm-ok').disabled         = false;
   $('confirm-ok-text').textContent = 'Delete';
   $('confirm-spinner').classList.add('hidden');
   closeConfirm();
@@ -771,7 +880,7 @@ async function runDelete() {
     return;
   }
 
-  if (result.needsSudo) {
+  if (!dockerMode && result.needsSudo) {
     openSudoModal(
       ctxTarget.name,
       'Delete with sudo',
@@ -846,7 +955,9 @@ async function runSudoAction() {
 
 // ── Drag overlay ───────────────────────────────────────────────────────────────
 function showDragOverlay(on) {
-  $('drag-dest').textContent = currentPath;
+  $('drag-dest').textContent = dockerMode
+    ? `🐳 ${dockerMode.name}:${currentPath}`
+    : currentPath;
   $('drag-overlay').classList.toggle('hidden', !on);
 }
 
@@ -882,12 +993,16 @@ async function handleUpload(files) {
   for (const file of files) {
     const localPath  = window.api.getFilePath(file);
     if (!localPath) continue;
-    const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-    const job        = uploadJobs.get(localPath);
+    const job = uploadJobs.get(localPath);
 
     setUploadStatus(job, 'uploading');
 
-    const result = await window.api.upload(localPath, remotePath);
+    // In docker mode: upload to server /tmp then docker cp into container
+    // In normal mode: upload directly via SFTP
+    const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+    const result = dockerMode
+      ? await window.api.dockerUpload(localPath, dockerMode.id, currentPath)
+      : await window.api.upload(localPath, remotePath);
 
     if (result.success) {
       setUploadStatus(job, 'done');
