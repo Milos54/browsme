@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   // SSH / SFTP
   connect:    (opts)  => ipcRenderer.invoke('ssh:connect', opts),
   disconnect: ()      => ipcRenderer.invoke('ssh:disconnect'),
+  hop:        (opts)  => ipcRenderer.invoke('ssh:hop', opts),
   readdir:    (path)  => ipcRenderer.invoke('ssh:readdir', { path }),
   readfile:   (path)  => ipcRenderer.invoke('ssh:readfile', { path }),
   homedir:    ()      => ipcRenderer.invoke('ssh:homedir'),

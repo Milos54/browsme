@@ -28,8 +28,19 @@ function bindConnectForm() {
     await handleConnect();
   });
 
+  // Jump host toggle
+  $('chk-jump').addEventListener('change', (e) => {
+    const on = e.target.checked;
+    $('jump-section').classList.toggle('hidden', !on);
+    $('password-optional').classList.toggle('hidden', !on);
+  });
+
   // Allow Enter in any field to submit
-  ['input-host', 'input-username', 'input-port', 'input-password'].forEach((id) => {
+  const formFields = [
+    'input-host', 'input-username', 'input-port', 'input-password',
+    'jump-host', 'jump-username', 'jump-port', 'jump-password',
+  ];
+  formFields.forEach((id) => {
     $(id).addEventListener('keydown', (e) => {
       if (e.key === 'Enter') $('connect-form').dispatchEvent(new Event('submit'));
     });
@@ -45,14 +56,21 @@ function bindExplorerControls() {
   $('btn-retry').addEventListener('click',   () => loadDirectory(currentPath, false));
   $('btn-view-grid').addEventListener('click', () => setViewMode('grid'));
   $('btn-view-list').addEventListener('click', () => setViewMode('list'));
+  $('btn-hop').addEventListener('click', openHopModal);
+
+  // Hop modal
+  $('hop-form').addEventListener('submit', async (e) => { e.preventDefault(); await handleHop(); });
+  $('hop-close').addEventListener('click', closeHopModal);
+  $('hop-backdrop').addEventListener('click', (e) => { if (e.target === $('hop-backdrop')) closeHopModal(); });
 
   // Preview modal close
   $('preview-close').addEventListener('click', closePreview);
   $('preview-backdrop').addEventListener('click', (e) => {
     if (e.target === $('preview-backdrop')) closePreview();
   });
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closePreview();
+    if (e.key === 'Escape') { closePreview(); closeHopModal(); }
   });
 }
 
@@ -62,16 +80,34 @@ async function handleConnect() {
   const username = $('input-username').value.trim();
   const password = $('input-password').value;
   const port     = parseInt($('input-port').value, 10) || 22;
+  const useJump  = $('chk-jump').checked;
 
-  if (!host || !username || !password) {
-    showConnectError('Please fill in host, username and password.');
+  if (!host || !username) {
+    showConnectError('Please fill in host and username.');
     return;
+  }
+  if (!password && !useJump) {
+    showConnectError('Please fill in your password.');
+    return;
+  }
+
+  let jump = null;
+  if (useJump) {
+    const jHost = $('jump-host').value.trim();
+    const jUser = $('jump-username').value.trim();
+    const jPass = $('jump-password').value;
+    const jPort = parseInt($('jump-port').value, 10) || 22;
+    if (!jHost || !jUser || !jPass) {
+      showConnectError('Please fill in all jump host fields (host, username, password).');
+      return;
+    }
+    jump = { host: jHost, username: jUser, password: jPass, port: jPort };
   }
 
   setConnecting(true);
   clearConnectError();
 
-  const result = await window.api.connect({ host, username, password, port });
+  const result = await window.api.connect({ host, username, password, port, jump });
 
   if (!result.success) {
     setConnecting(false);
@@ -79,9 +115,12 @@ async function handleConnect() {
     return;
   }
 
-  connectionInfo = { host, username, port };
-  $('titlebar-title').textContent = `SSH Explorer — ${username}@${host}`;
-  $('status-connection').textContent = `Connected: ${username}@${host}:${port}`;
+  connectionInfo = { host, username, port, jump };
+  const label = jump
+    ? `${username}@${host} via ${jump.username}@${jump.host}`
+    : `${username}@${host}`;
+  $('titlebar-title').textContent     = `SSH Explorer — ${label}`;
+  $('status-connection').textContent  = `Connected: ${label}`;
 
   navHistory   = [];
   historyIndex = -1;
@@ -104,6 +143,70 @@ async function handleDisconnect() {
   $('status-items').textContent   = '';
   setConnecting(false);
   showScreen('connect');
+}
+
+// ── Hop Modal ──────────────────────────────────────────────────────────────────
+function openHopModal() {
+  $('hop-input-host').value     = '';
+  $('hop-input-username').value = '';
+  $('hop-input-password').value = '';
+  $('hop-input-port').value     = '22';
+  $('hop-error').classList.add('hidden');
+  $('hop-backdrop').classList.remove('hidden');
+  setTimeout(() => $('hop-input-host').focus(), 50);
+}
+
+function closeHopModal() {
+  $('hop-backdrop').classList.add('hidden');
+}
+
+async function handleHop() {
+  const host     = $('hop-input-host').value.trim();
+  const username = $('hop-input-username').value.trim();
+  const password = $('hop-input-password').value;
+  const port     = parseInt($('hop-input-port').value, 10) || 22;
+
+  if (!host || !username) {
+    $('hop-error').textContent = 'Please fill in host and username.';
+    $('hop-error').classList.remove('hidden');
+    return;
+  }
+
+  // Show spinner
+  $('btn-hop-connect').disabled  = true;
+  $('hop-btn-text').textContent  = 'Connecting…';
+  $('hop-spinner').classList.remove('hidden');
+  $('hop-error').classList.add('hidden');
+
+  const result = await window.api.hop({ host, username, password, port });
+
+  $('btn-hop-connect').disabled = false;
+  $('hop-btn-text').textContent = 'Connect';
+  $('hop-spinner').classList.add('hidden');
+
+  if (!result.success) {
+    $('hop-error').textContent = result.error || 'Connection failed.';
+    $('hop-error').classList.remove('hidden');
+    return;
+  }
+
+  // Success — update UI
+  const prevLabel = connectionInfo
+    ? `${connectionInfo.username}@${connectionInfo.host}`
+    : 'previous server';
+  connectionInfo = { host, username, port, via: prevLabel };
+
+  const label = `${username}@${host} (via ${prevLabel})`;
+  $('titlebar-title').textContent    = `SSH Explorer — ${label}`;
+  $('status-connection').textContent = `Connected: ${label}`;
+
+  closeHopModal();
+
+  navHistory   = [];
+  historyIndex = -1;
+  const homeResult = await window.api.homedir();
+  const homePath   = (homeResult.success && homeResult.path) ? homeResult.path : '/';
+  await loadDirectory(homePath, true);
 }
 
 function setConnecting(on) {

@@ -32,11 +32,44 @@
         </div>
 
         <form id="connect-form" autocomplete="off" novalidate>
+
+          <!-- Jump host toggle -->
+          <label class="jump-toggle">
+            <input type="checkbox" id="chk-jump" />
+            <span class="jump-toggle-label">Connect via jump host (bastion)</span>
+          </label>
+
+          <!-- Jump host fields (hidden by default) -->
+          <div id="jump-section" class="jump-section hidden">
+            <div class="section-label">Jump Host</div>
+            <div class="field-group">
+              <label for="jump-host">Host / IP Address</label>
+              <input id="jump-host" type="text" placeholder="bastion.example.com" spellcheck="false" />
+            </div>
+            <div class="field-row">
+              <div class="field-group field-grow">
+                <label for="jump-username">Username</label>
+                <input id="jump-username" type="text" placeholder="admin" spellcheck="false" />
+              </div>
+              <div class="field-group field-port">
+                <label for="jump-port">Port</label>
+                <input id="jump-port" type="number" value="22" min="1" max="65535" />
+              </div>
+            </div>
+            <div class="field-group">
+              <label for="jump-password">Password</label>
+              <input id="jump-password" type="password" placeholder="••••••••" />
+            </div>
+            <div class="section-divider">
+              <span>Target Server</span>
+            </div>
+          </div>
+
+          <!-- Target server fields -->
           <div class="field-group">
             <label for="input-host">Host / IP Address</label>
             <input id="input-host" type="text" placeholder="192.168.1.100 or server.example.com" spellcheck="false" />
           </div>
-
           <div class="field-row">
             <div class="field-group field-grow">
               <label for="input-username">Username</label>
@@ -47,9 +80,11 @@
               <input id="input-port" type="number" value="22" min="1" max="65535" />
             </div>
           </div>
-
           <div class="field-group">
-            <label for="input-password">Password</label>
+            <label for="input-password">
+              Password
+              <span id="password-optional" class="field-optional hidden">(optional — uses SSH key if blank)</span>
+            </label>
             <input id="input-password" type="password" placeholder="••••••••" />
           </div>
 
@@ -84,6 +119,8 @@
         <button id="btn-view-grid" class="view-btn active" title="Icon view">&#x229E;</button>
         <button id="btn-view-list" class="view-btn"        title="List view">&#x2261;</button>
         <div class="toolbar-sep"></div>
+        <button id="btn-hop" class="hop-btn" title="Connect to another server through current connection">&#x21D2; Connect to server</button>
+        <div class="toolbar-sep"></div>
         <button id="btn-disconnect" class="disconnect-btn">&#x23FB; Disconnect</button>
       </div>
     </div>
@@ -115,6 +152,45 @@
       <span id="status-items"></span>
     </div>
 
+  </div>
+
+  <!-- ── Hop Modal ───────────────────────────────────────────────────────── -->
+  <div id="hop-backdrop" class="hop-backdrop hidden">
+    <div class="hop-modal">
+      <div class="hop-modal-header">
+        <span>Connect to another server</span>
+        <button id="hop-close" class="preview-close" title="Close">&#x2715;</button>
+      </div>
+      <p class="hop-subtitle">Opens a tunnel through your current connection</p>
+      <form id="hop-form" autocomplete="off" novalidate>
+        <div class="field-group">
+          <label for="hop-input-host">Host / IP Address</label>
+          <input id="hop-input-host" type="text" placeholder="10.0.0.50 or webserver.local" spellcheck="false" />
+        </div>
+        <div class="field-row">
+          <div class="field-group field-grow">
+            <label for="hop-input-username">Username</label>
+            <input id="hop-input-username" type="text" placeholder="deploy" spellcheck="false" />
+          </div>
+          <div class="field-group field-port">
+            <label for="hop-input-port">Port</label>
+            <input id="hop-input-port" type="number" value="22" min="1" max="65535" />
+          </div>
+        </div>
+        <div class="field-group">
+          <label for="hop-input-password">
+            Password
+            <span class="field-optional">(optional — uses SSH key if blank)</span>
+          </label>
+          <input id="hop-input-password" type="password" placeholder="leave blank for key auth" />
+        </div>
+        <div id="hop-error" class="error-msg hidden"></div>
+        <button type="submit" id="btn-hop-connect" class="connect-btn">
+          <span id="hop-btn-text">Connect</span>
+          <span id="hop-spinner" class="spinner hidden"></span>
+        </button>
+      </form>
+    </div>
   </div>
 
   <!-- ── File Preview Modal ───────────────────────────────────────────────── -->
