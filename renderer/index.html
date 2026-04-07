@@ -119,6 +119,9 @@
         <button id="btn-view-grid" class="view-btn active" title="Icon view">&#x229E;</button>
         <button id="btn-view-list" class="view-btn"        title="List view">&#x2261;</button>
         <div class="toolbar-sep"></div>
+        <button id="btn-paste" class="paste-btn hidden" title="Paste copied item here">📋 <span id="paste-label"></span></button>
+        <button id="btn-paste-clear" class="paste-clear-btn hidden" title="Clear clipboard">&#x2715;</button>
+        <div id="paste-sep" class="toolbar-sep hidden"></div>
         <button id="btn-hop" class="hop-btn" title="Connect to another server through current connection">&#x21D2; Connect to server</button>
         <div class="toolbar-sep"></div>
         <button id="btn-disconnect" class="disconnect-btn">&#x23FB; Disconnect</button>
@@ -128,6 +131,24 @@
     <!-- File Area -->
     <div id="file-area" class="file-area">
       <div id="file-container" class="file-grid"></div>
+
+      <!-- Drag-over overlay -->
+      <div id="drag-overlay" class="drag-overlay hidden">
+        <div class="drag-overlay-inner">
+          <span class="drag-upload-icon">⬆️</span>
+          <span class="drag-upload-title">Drop to upload</span>
+          <span id="drag-dest" class="drag-upload-dest"></span>
+        </div>
+      </div>
+
+      <!-- Upload progress panel -->
+      <div id="upload-panel" class="upload-panel hidden">
+        <div class="upload-panel-hdr">
+          <span id="upload-panel-title">Uploading…</span>
+          <button id="upload-panel-close" class="upload-panel-close">&#x2715;</button>
+        </div>
+        <div id="upload-list" class="upload-list"></div>
+      </div>
 
       <div id="loading-overlay" class="overlay-center hidden">
         <div class="loading-spinner"></div>
@@ -157,6 +178,7 @@
   <!-- ── Right-click Context Menu ────────────────────────────────────────── -->
   <div id="ctx-menu" class="ctx-menu hidden">
     <button id="ctx-rename" class="ctx-item">✏️ Rename</button>
+    <button id="ctx-copy"   class="ctx-item">📋 Copy</button>
     <div class="ctx-sep"></div>
     <button id="ctx-delete" class="ctx-item ctx-danger">🗑️ Delete</button>
   </div>

@@ -47,6 +47,12 @@ function bindConnectForm() {
   });
 }
 
+// ── Upload ─────────────────────────────────────────────────────────────────────
+// Register the progress listener once at startup
+window.api.onUploadProgress(({ localPath, transferred, total }) => {
+  updateUploadProgress(localPath, transferred, total);
+});
+
 function bindExplorerControls() {
   $('btn-back').addEventListener('click',    () => navigateHistory(-1));
   $('btn-forward').addEventListener('click', () => navigateHistory(1));
@@ -57,6 +63,37 @@ function bindExplorerControls() {
   $('btn-view-grid').addEventListener('click', () => setViewMode('grid'));
   $('btn-view-list').addEventListener('click', () => setViewMode('list'));
   $('btn-hop').addEventListener('click', openHopModal);
+
+  // Drag & drop upload
+  const fileArea = $('file-area');
+  let dragCounter = 0;
+
+  fileArea.addEventListener('dragenter', (e) => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    dragCounter++;
+    if (dragCounter === 1) showDragOverlay(true);
+  });
+  fileArea.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  fileArea.addEventListener('dragleave', () => {
+    dragCounter--;
+    if (dragCounter <= 0) { dragCounter = 0; showDragOverlay(false); }
+  });
+  fileArea.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    showDragOverlay(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) handleUpload(files);
+  });
+
+  $('upload-panel-close').addEventListener('click', () => {
+    $('upload-panel').classList.add('hidden');
+  });
 
   // Hop modal
   $('hop-form').addEventListener('submit', async (e) => { e.preventDefault(); await handleHop(); });
@@ -73,7 +110,10 @@ function bindExplorerControls() {
   document.addEventListener('click',       hideCtxMenu);
   document.addEventListener('contextmenu', (e) => e.preventDefault()); // block default
   $('ctx-rename').addEventListener('click', () => { hideCtxMenu(); startRename(); });
+  $('ctx-copy').addEventListener('click',   () => { hideCtxMenu(); copyToClipboard(); });
   $('ctx-delete').addEventListener('click', () => { hideCtxMenu(); startDelete(); });
+  $('btn-paste').addEventListener('click',       runPaste);
+  $('btn-paste-clear').addEventListener('click', clearClipboard);
 
   // Rename modal
   $('rename-cancel').addEventListener('click', closeRename);
@@ -89,8 +129,8 @@ function bindExplorerControls() {
   // Sudo modal
   $('sudo-cancel').addEventListener('click', closeSudo);
   $('sudo-backdrop').addEventListener('click', (e) => { if (e.target === $('sudo-backdrop')) closeSudo(); });
-  $('sudo-ok').addEventListener('click', runDeleteSudo);
-  $('sudo-pass-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runDeleteSudo(); });
+  $('sudo-ok').addEventListener('click', runSudoAction);
+  $('sudo-pass-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSudoAction(); });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename(); }
@@ -618,6 +658,64 @@ async function runRename() {
   loadDirectory(currentPath, false);
 }
 
+// ── Clipboard (server-side copy) ───────────────────────────────────────────────
+let clipboardItem = null; // { name, fullPath }
+
+function copyToClipboard() {
+  if (!ctxTarget) return;
+  clipboardItem = { name: ctxTarget.name, fullPath: ctxTarget.fullPath };
+  $('paste-label').textContent  = clipboardItem.name;
+  $('btn-paste').classList.remove('hidden');
+  $('btn-paste-clear').classList.remove('hidden');
+  $('paste-sep').classList.remove('hidden');
+}
+
+function clearClipboard() {
+  clipboardItem = null;
+  $('btn-paste').classList.add('hidden');
+  $('btn-paste-clear').classList.add('hidden');
+  $('paste-sep').classList.add('hidden');
+}
+
+async function runPaste() {
+  if (!clipboardItem) return;
+
+  // If pasting into the same directory, use "copy of " prefix to avoid collision
+  const srcDir  = clipboardItem.fullPath.substring(0, clipboardItem.fullPath.lastIndexOf('/')) || '/';
+  let destName  = clipboardItem.name;
+  let destPath  = currentPath === '/' ? `/${destName}` : `${currentPath}/${destName}`;
+
+  if (srcDir === currentPath) {
+    destName = `copy of ${clipboardItem.name}`;
+    destPath = currentPath === '/' ? `/${destName}` : `${currentPath}/${destName}`;
+  }
+
+  $('btn-paste').disabled = true;
+
+  const result = await window.api.copy(clipboardItem.fullPath, destPath);
+
+  $('btn-paste').disabled = false;
+
+  if (result.success) {
+    loadDirectory(currentPath, false);
+    return;
+  }
+
+  if (result.needsSudo) {
+    const src = clipboardItem.fullPath;
+    const dst = destPath;
+    openSudoModal(
+      clipboardItem.name,
+      'Copy with sudo',
+      (pass) => window.api.copySudo(src, dst, pass)
+    );
+    return;
+  }
+
+  $('status-items').textContent = `⚠ ${result.error}`;
+  setTimeout(() => loadDirectory(currentPath, false), 4000);
+}
+
 // ── Context Menu ───────────────────────────────────────────────────────────────
 let ctxTarget = null; // { name, isDirectory, fullPath }
 
@@ -674,7 +772,11 @@ async function runDelete() {
   }
 
   if (result.needsSudo) {
-    openSudoModal();
+    openSudoModal(
+      ctxTarget.name,
+      'Delete with sudo',
+      (pass) => window.api.deleteSudo(ctxTarget.fullPath, pass)
+    );
     return;
   }
 
@@ -685,12 +787,18 @@ async function runDelete() {
   }, 4000);
 }
 
-function openSudoModal() {
-  $('sudo-item-name').textContent = ctxTarget ? ctxTarget.name : '';
-  $('sudo-pass-input').value = '';
+// Generic sudo modal — set pendingSudoAction before opening
+let pendingSudoAction = null; // async (password) => { success, wrongPassword, error }
+let sudoActionLabel   = 'Confirm';
+
+function openSudoModal(itemName, actionLabel, action) {
+  pendingSudoAction = action;
+  sudoActionLabel   = actionLabel;
+  $('sudo-item-name').textContent  = itemName || '';
+  $('sudo-pass-input').value       = '';
   $('sudo-error').classList.add('hidden');
-  $('sudo-ok').disabled = false;
-  $('sudo-ok-text').textContent = 'Delete with sudo';
+  $('sudo-ok').disabled            = false;
+  $('sudo-ok-text').textContent    = actionLabel;
   $('sudo-spinner').classList.add('hidden');
   $('sudo-backdrop').classList.remove('hidden');
   setTimeout(() => $('sudo-pass-input').focus(), 50);
@@ -699,10 +807,11 @@ function openSudoModal() {
 function closeSudo() {
   $('sudo-backdrop').classList.add('hidden');
   $('sudo-pass-input').value = '';
+  pendingSudoAction = null;
 }
 
-async function runDeleteSudo() {
-  if (!ctxTarget) return;
+async function runSudoAction() {
+  if (!pendingSudoAction) return;
   const pass = $('sudo-pass-input').value;
   if (!pass) {
     $('sudo-error').textContent = 'Please enter the sudo password.';
@@ -710,15 +819,15 @@ async function runDeleteSudo() {
     return;
   }
 
-  $('sudo-ok').disabled = true;
-  $('sudo-ok-text').textContent = 'Deleting…';
+  $('sudo-ok').disabled            = true;
+  $('sudo-ok-text').textContent    = 'Working…';
   $('sudo-spinner').classList.remove('hidden');
   $('sudo-error').classList.add('hidden');
 
-  const result = await window.api.deleteSudo(ctxTarget.fullPath, pass);
+  const result = await pendingSudoAction(pass);
 
-  $('sudo-ok').disabled = false;
-  $('sudo-ok-text').textContent = 'Delete with sudo';
+  $('sudo-ok').disabled            = false;
+  $('sudo-ok-text').textContent    = sudoActionLabel;
   $('sudo-spinner').classList.add('hidden');
 
   if (result.success) {
@@ -729,10 +838,96 @@ async function runDeleteSudo() {
 
   $('sudo-error').textContent = result.wrongPassword
     ? 'Incorrect sudo password. Try again.'
-    : (result.error || 'Delete failed.');
+    : (result.error || 'Operation failed.');
   $('sudo-error').classList.remove('hidden');
   $('sudo-pass-input').value = '';
   $('sudo-pass-input').focus();
+}
+
+// ── Drag overlay ───────────────────────────────────────────────────────────────
+function showDragOverlay(on) {
+  $('drag-dest').textContent = currentPath;
+  $('drag-overlay').classList.toggle('hidden', !on);
+}
+
+// ── Upload ─────────────────────────────────────────────────────────────────────
+const uploadJobs = new Map(); // localPath → { name, total, transferred, status, el }
+let uploadDoneTimer = null;
+
+async function handleUpload(files) {
+  const panel = $('upload-panel');
+  const list  = $('upload-list');
+
+  // Register all jobs first so the panel shows immediately
+  files.forEach((file) => {
+    const localPath = window.api.getFilePath(file);
+    if (!localPath) return;
+    const row = document.createElement('div');
+    row.className = 'upload-row';
+    row.innerHTML = `
+      <span class="up-name" title="${escHtml(file.name)}">${escHtml(file.name)}</span>
+      <div class="up-bar-wrap"><div class="up-bar" style="width:0%"></div></div>
+      <span class="up-pct">0%</span>
+      <span class="up-status up-waiting">waiting</span>
+    `;
+    list.appendChild(row);
+    uploadJobs.set(localPath, { name: file.name, total: file.size || 0, transferred: 0, status: 'waiting', el: row });
+  });
+
+  $('upload-panel-title').textContent = `Uploading ${files.length} file${files.length > 1 ? 's' : ''}…`;
+  panel.classList.remove('hidden');
+  if (uploadDoneTimer) { clearTimeout(uploadDoneTimer); uploadDoneTimer = null; }
+
+  // Upload sequentially
+  for (const file of files) {
+    const localPath  = window.api.getFilePath(file);
+    if (!localPath) continue;
+    const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+    const job        = uploadJobs.get(localPath);
+
+    setUploadStatus(job, 'uploading');
+
+    const result = await window.api.upload(localPath, remotePath);
+
+    if (result.success) {
+      setUploadStatus(job, 'done');
+      job.el.querySelector('.up-bar').style.width = '100%';
+      job.el.querySelector('.up-pct').textContent = '100%';
+    } else {
+      setUploadStatus(job, 'error', result.error);
+    }
+  }
+
+  // Refresh directory
+  loadDirectory(currentPath, false);
+
+  const allOk = [...uploadJobs.values()].every((j) => j.status === 'done');
+  $('upload-panel-title').textContent = allOk ? 'Upload complete' : 'Upload finished (with errors)';
+
+  if (allOk) {
+    uploadDoneTimer = setTimeout(() => {
+      $('upload-panel').classList.add('hidden');
+      $('upload-list').innerHTML = '';
+      uploadJobs.clear();
+    }, 3000);
+  }
+}
+
+function updateUploadProgress(localPath, transferred, total) {
+  const job = uploadJobs.get(localPath);
+  if (!job) return;
+  job.transferred = transferred;
+  job.total       = total || job.total;
+  const pct       = job.total > 0 ? Math.round((transferred / job.total) * 100) : 0;
+  job.el.querySelector('.up-bar').style.width  = `${pct}%`;
+  job.el.querySelector('.up-pct').textContent  = `${pct}%`;
+}
+
+function setUploadStatus(job, status, errorMsg) {
+  job.status = status;
+  const statusEl  = job.el.querySelector('.up-status');
+  statusEl.className = `up-status up-${status}`;
+  statusEl.textContent = status === 'error' ? (errorMsg || 'error') : status;
 }
 
 // Close preview

@@ -396,6 +396,40 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   margin: 0 4px;
 }
 
+.paste-btn {
+  padding: 5px 11px;
+  background: rgba(88, 166, 255, 0.1);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s;
+  white-space: nowrap;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.paste-btn:hover    { background: rgba(88, 166, 255, 0.18); }
+.paste-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.paste-clear-btn {
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: -2px;
+  transition: background 0.1s, color 0.1s;
+}
+.paste-clear-btn:hover { background: var(--surface2); color: var(--text); }
+
 .hop-btn {
   padding: 5px 11px;
   background: none;
@@ -870,6 +904,128 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   tab-size: 2;
   margin: 0;
 }
+
+/* ── Drag-over overlay ──────────────────────────────────────────────────────── */
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(88, 166, 255, 0.07);
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.drag-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.drag-upload-icon  { font-size: 48px; }
+.drag-upload-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.drag-upload-dest  {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-family: monospace;
+}
+
+/* ── Upload progress panel ──────────────────────────────────────────────────── */
+.upload-panel {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+  z-index: 60;
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.upload-panel-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.upload-panel-close {
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s;
+}
+.upload-panel-close:hover { background: var(--surface2); color: var(--text); }
+
+.upload-list {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px 0;
+}
+.upload-list::-webkit-scrollbar { width: 6px; }
+.upload-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.upload-row {
+  display: grid;
+  grid-template-columns: 1fr 140px 40px 70px;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 14px;
+  font-size: 12px;
+}
+.upload-row:hover { background: var(--surface2); }
+
+.up-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.up-bar-wrap {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.up-bar {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.2s;
+}
+
+.up-pct { color: var(--text-dim); text-align: right; }
+
+.up-status { font-size: 11px; font-weight: 600; text-align: right; }
+.up-waiting  { color: var(--text-dim); }
+.up-uploading { color: var(--accent); }
+.up-done     { color: #3fb950; }
+.up-error    { color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Symlink badges ─────────────────────────────────────────────────────────── */
 .file-badge {

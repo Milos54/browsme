@@ -243,6 +243,21 @@ ipcMain.handle('ssh:rename', (_event, { oldPath, newPath }) => {
   });
 });
 
+// ── SSH: Copy ─────────────────────────────────────────────────────────────────
+ipcMain.handle('ssh:copy', async (_event, { srcPath, dstPath }) => {
+  const { code, stderr } = await runExec(`cp -rp ${escapeSh(srcPath)} ${escapeSh(dstPath)}`);
+  if (code === 0) return { success: true };
+  const isPermission = /Permission denied|Operation not permitted/i.test(stderr);
+  return { success: false, needsSudo: isPermission, error: stderr.trim() || `Exit code ${code}` };
+});
+
+ipcMain.handle('ssh:copy-sudo', async (_event, { srcPath, dstPath, password }) => {
+  const { code, stderr } = await runExec(`sudo -S cp -rp ${escapeSh(srcPath)} ${escapeSh(dstPath)}`, password);
+  if (code === 0) return { success: true };
+  const wrongPass = /incorrect password|Sorry|try again/i.test(stderr);
+  return { success: false, wrongPassword: wrongPass, error: stderr.trim() || `Exit code ${code}` };
+});
+
 // ── SSH: Delete (try normal first, report if sudo needed) ─────────────────────
 function runExec(cmd, stdinData) {
   return new Promise((resolve) => {
@@ -350,6 +365,29 @@ ipcMain.handle('ssh:readdir', (_event, { path: dirPath }) => {
 
       resolve({ success: true, files });
     });
+  });
+});
+
+// ── SSH: Upload file ──────────────────────────────────────────────────────────
+ipcMain.handle('ssh:upload', (_event, { localPath, remotePath }) => {
+  return new Promise((resolve) => {
+    if (!sftpSession) { resolve({ success: false, error: 'Not connected' }); return; }
+
+    sftpSession.fastPut(
+      localPath,
+      remotePath,
+      {
+        step: (transferred, _chunk, total) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('upload:progress', { localPath, transferred, total });
+          }
+        },
+      },
+      (err) => {
+        if (err) resolve({ success: false, error: err.message });
+        else      resolve({ success: true });
+      }
+    );
   });
 });
 
