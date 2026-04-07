@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>SSH Explorer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ── Title Bar ────────────────────────────────────────────────────────── -->
+  <header class="titlebar">
+    <div class="titlebar-drag">
+      <span class="app-icon">⚡</span>
+      <span class="app-title" id="titlebar-title">SSH Explorer</span>
+    </div>
+    <div class="titlebar-controls">
+      <button class="ctrl-btn" id="btn-minimize" title="Minimize">&#x2500;</button>
+      <button class="ctrl-btn" id="btn-maximize" title="Maximize">&#x25A1;</button>
+      <button class="ctrl-btn close-btn" id="btn-close" title="Close">&#x2715;</button>
+    </div>
+  </header>
+
+  <!-- ── Connect Screen ───────────────────────────────────────────────────── -->
+  <div id="connect-screen" class="screen active">
+    <div class="connect-bg">
+      <div class="connect-card">
+        <div class="connect-header">
+          <div class="connect-icon">🖥️</div>
+          <h1>SSH File Explorer</h1>
+          <p>Connect to a remote server via SSH</p>
+        </div>
+
+        <form id="connect-form" autocomplete="off" novalidate>
+          <div class="field-group">
+            <label for="input-host">Host / IP Address</label>
+            <input id="input-host" type="text" placeholder="192.168.1.100 or server.example.com" spellcheck="false" />
+          </div>
+
+          <div class="field-row">
+            <div class="field-group field-grow">
+              <label for="input-username">Username</label>
+              <input id="input-username" type="text" placeholder="root" spellcheck="false" />
+            </div>
+            <div class="field-group field-port">
+              <label for="input-port">Port</label>
+              <input id="input-port" type="number" value="22" min="1" max="65535" />
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="input-password">Password</label>
+            <input id="input-password" type="password" placeholder="••••••••" />
+          </div>
+
+          <div id="connect-error" class="error-msg hidden"></div>
+
+          <button type="submit" id="btn-connect" class="connect-btn">
+            <span id="connect-btn-text">Connect</span>
+            <span id="connect-spinner" class="spinner hidden"></span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Explorer Screen ──────────────────────────────────────────────────── -->
+  <div id="explorer-screen" class="screen">
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <div class="nav-btns">
+        <button id="btn-back"    class="nav-btn" title="Back"    disabled>&#8249;</button>
+        <button id="btn-forward" class="nav-btn" title="Forward" disabled>&#8250;</button>
+        <button id="btn-up"      class="nav-btn" title="Go up"   disabled>&#8593;</button>
+        <button id="btn-refresh" class="nav-btn" title="Refresh">&#8635;</button>
+      </div>
+
+      <div class="path-bar">
+        <div id="breadcrumb" class="breadcrumb"></div>
+      </div>
+
+      <div class="toolbar-right">
+        <button id="btn-view-grid" class="view-btn active" title="Icon view">&#x229E;</button>
+        <button id="btn-view-list" class="view-btn"        title="List view">&#x2261;</button>
+        <div class="toolbar-sep"></div>
+        <button id="btn-disconnect" class="disconnect-btn">&#x23FB; Disconnect</button>
+      </div>
+    </div>
+
+    <!-- File Area -->
+    <div id="file-area" class="file-area">
+      <div id="file-container" class="file-grid"></div>
+
+      <div id="loading-overlay" class="overlay-center hidden">
+        <div class="loading-spinner"></div>
+        <span>Loading…</span>
+      </div>
+
+      <div id="empty-msg" class="overlay-center hidden">
+        <span class="overlay-icon">📂</span>
+        <span>This folder is empty</span>
+      </div>
+
+      <div id="error-overlay" class="overlay-center hidden">
+        <span class="overlay-icon">⚠️</span>
+        <span id="error-text">Error loading directory</span>
+        <button id="btn-retry" class="retry-btn">Try Again</button>
+      </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="status-bar">
+      <span id="status-connection">Not connected</span>
+      <span id="status-items"></span>
+    </div>
+
+  </div>
+
+  <!-- ── File Preview Modal ───────────────────────────────────────────────── -->
+  <div id="preview-backdrop" class="preview-backdrop hidden">
+    <div id="preview-modal" class="preview-modal">
+      <div class="preview-header">
+        <div class="preview-title-wrap">
+          <span id="preview-icon" class="preview-file-icon"></span>
+          <span id="preview-filename" class="preview-filename"></span>
+          <span id="preview-size" class="preview-filesize"></span>
+        </div>
+        <button id="preview-close" class="preview-close" title="Close">&#x2715;</button>
+      </div>
+      <div id="preview-body" class="preview-body">
+        <div id="preview-loading" class="preview-loading hidden">
+          <div class="loading-spinner"></div>
+          <span>Loading file…</span>
+        </div>
+        <div id="preview-error" class="preview-error hidden"></div>
+        <pre id="preview-content" class="preview-content hidden"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
