@@ -178,7 +178,15 @@ function bindExplorerControls() {
       if (remoteEditor.open) return;
       closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename();
     }
+    if (handleFileListKey(e)) return;
     handleTypeAheadKey(e);
+  });
+
+  document.addEventListener('pointerdown', (e) => {
+    if (e.target.closest && e.target.closest('#file-container')) return;
+    const item = focusedFileItem();
+    clearFileSelection();
+    if (item && !isFocusableControl(e.target)) item.blur();
   });
 }
 
@@ -237,7 +245,7 @@ async function handleConnect() {
 
   const homeResult = await window.api.homedir();
   const homePath   = (homeResult.success && homeResult.path) ? homeResult.path : '/';
-  await loadDirectory(homePath, true);
+  await loadDirectory(homePath, true, true);
 }
 
 async function handleDisconnect() {
@@ -314,7 +322,7 @@ async function handleHop() {
   historyIndex = -1;
   const homeResult = await window.api.homedir();
   const homePath   = (homeResult.success && homeResult.path) ? homeResult.path : '/';
-  await loadDirectory(homePath, true);
+  await loadDirectory(homePath, true, true);
 }
 
 function setConnecting(on) {
@@ -334,7 +342,7 @@ function clearConnectError() {
 }
 
 // ── Navigation ─────────────────────────────────────────────────────────────────
-async function loadDirectory(dirPath, pushHistory = true) {
+async function loadDirectory(dirPath, pushHistory = true, focusFirst = false) {
   if (isLoading) return;
   isLoading = true;
 
@@ -371,6 +379,7 @@ async function loadDirectory(dirPath, pushHistory = true) {
   updateBreadcrumb(dirPath);
   updateNavButtons();
   renderFiles(currentFiles);
+  if (focusFirst) focusFirstFileItem();
 
   const count = currentFiles.length;
   $('status-items').textContent = `${count} item${count !== 1 ? 's' : ''}`;
@@ -380,7 +389,7 @@ function navigateHistory(delta) {
   const newIndex = historyIndex + delta;
   if (newIndex < 0 || newIndex >= navHistory.length) return;
   historyIndex = newIndex;
-  loadDirectory(navHistory[newIndex], false);
+  loadDirectory(navHistory[newIndex], false, true);
 }
 
 function navigateUp() {
@@ -388,7 +397,7 @@ function navigateUp() {
   const parts  = currentPath.replace(/\/$/, '').split('/');
   parts.pop();
   const parent = parts.join('/') || '/';
-  loadDirectory(parent);
+  loadDirectory(parent, true, true);
 }
 
 function updateNavButtons() {
@@ -415,7 +424,7 @@ function updateBreadcrumb(dirPath) {
     span.textContent = part === '' ? '/' : part;
 
     if (!isLast) {
-      span.addEventListener('click', () => loadDirectory(snapPath));
+      span.addEventListener('click', () => loadDirectory(snapPath, true, true));
     }
 
     bc.appendChild(span);
@@ -441,11 +450,19 @@ function renderFiles(files) {
     return;
   }
 
+  container.setAttribute('role', 'listbox');
+  container.setAttribute('aria-label', 'Folder contents');
+
   files.forEach((file) => {
     const item         = document.createElement('div');
     item.className     = 'file-item';
     item.dataset.name  = file.name;
     item.dataset.isDir = file.isDirectory;
+    // Focusable for Enter, arrows, and Tab, but not in the normal tab order.
+    // Tab moves between rows only while one is already focused.
+    item.tabIndex = -1;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', 'false');
 
     const icon     = getFileIcon(file.name, file.isDirectory, file.isSymlink);
     const sizeStr  = file.isDirectory ? '' : formatSize(file.size);
@@ -469,23 +486,17 @@ function renderFiles(files) {
       `;
     }
 
-    if (file.isDirectory) {
-      // isDirectory is true for real dirs AND symlinks-to-dirs (resolved in main)
-      item.addEventListener('dblclick', () => {
-        const newPath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        loadDirectory(newPath);
-      });
-    } else if (!file.isSymlink) {
-      item.addEventListener('dblclick', () => {
-        const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        // Container files keep the existing preview. Do not send them through SFTP editing.
-        if (dockerMode || isReadOnlyExtension(file.name)) {
-          openPreview(filePath, file.name, file.size);
-        } else {
-          openRemoteEditor(filePath, file.name, file.size);
-        }
-      });
-    }
+    // isDirectory is true for real dirs AND symlinks-to-dirs (resolved in main)
+    item.addEventListener('dblclick', () => activateFileItem(item));
+
+    item.addEventListener('focusout', (e) => {
+      const next = e.relatedTarget;
+      // Keep the highlight when focus stays in the list, or when the window
+      // itself blurs (relatedTarget is null) so Alt-Tab does not drop it.
+      if (!next || (next.closest && next.closest('#file-container'))) return;
+      item.classList.remove('selected');
+      item.setAttribute('aria-selected', 'false');
+    });
 
     item.addEventListener('click', () => {
       resetTypeAhead();
@@ -508,11 +519,147 @@ function resetTypeAhead() {
   typeAheadAt = 0;
 }
 
+function focusFirstFileItem() {
+  const first = $('file-container').querySelector('.file-item');
+  if (first) selectFileItem(first, true);
+}
+
 function selectFileItem(item, reveal) {
   const container = $('file-container');
-  container.querySelectorAll('.file-item.selected').forEach((el) => el.classList.remove('selected'));
+  container.querySelectorAll('.file-item.selected').forEach((el) => {
+    el.classList.remove('selected');
+    el.setAttribute('aria-selected', 'false');
+  });
   item.classList.add('selected');
+  item.setAttribute('aria-selected', 'true');
+  item.focus({ preventScroll: true });
   if (reveal) item.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function remoteChildPath(name) {
+  return currentPath === '/' ? `/${name}` : `${currentPath}/${name}`;
+}
+
+function activateFileItem(item) {
+  const file = currentFiles.find((f) => f.name === item.dataset.name);
+  if (!file) return;
+  const filePath = remoteChildPath(file.name);
+  if (file.isDirectory) {
+    loadDirectory(filePath, true, true);
+    return;
+  }
+  if (file.isSymlink) return;
+  // Container files keep the existing preview. Do not send them through SFTP editing.
+  if (dockerMode || isReadOnlyExtension(file.name)) {
+    openPreview(filePath, file.name, file.size);
+  } else {
+    openRemoteEditor(filePath, file.name, file.size);
+  }
+}
+
+function focusedFileItem() {
+  const el = document.activeElement;
+  if (!el || !el.classList || !el.classList.contains('file-item')) return null;
+  if (!el.closest('#file-container')) return null;
+  return el;
+}
+
+function nextFileItem(current, delta) {
+  const container = $('file-container');
+  const items = Array.from(container.querySelectorAll('.file-item'));
+  const index = items.indexOf(current);
+  if (index < 0) return null;
+
+  if (viewMode !== 'grid') {
+    const next = index + delta;
+    if (next < 0 || next >= items.length) return null;
+    return items[next];
+  }
+
+  const cur = current.getBoundingClientRect();
+  const cx = cur.left + cur.width / 2;
+  const cy = cur.top + cur.height / 2;
+  let best = null;
+  let bestScore = Infinity;
+  for (const item of items) {
+    if (item === current) continue;
+    const rect = item.getBoundingClientRect();
+    const dx = (rect.left + rect.width / 2) - cx;
+    const dy = (rect.top + rect.height / 2) - cy;
+    if (delta > 0 ? dy <= 2 : dy >= -2) continue;
+    const score = Math.abs(dx) * 8 + Math.abs(dy);
+    if (score < bestScore) {
+      bestScore = score;
+      best = item;
+    }
+  }
+  return best;
+}
+
+function clearFileSelection() {
+  const container = $('file-container');
+  if (!container) return;
+  container.querySelectorAll('.file-item.selected').forEach((el) => {
+    el.classList.remove('selected');
+    el.setAttribute('aria-selected', 'false');
+  });
+}
+
+function isFocusableControl(el) {
+  if (!el || !el.closest) return false;
+  const stop = el.closest('button, a[href], input, select, textarea, [tabindex]');
+  if (!stop || stop.disabled || stop.tabIndex < 0) return false;
+  return true;
+}
+
+function moveFileFocus(item, delta) {
+  const next = nextFileItem(item, delta);
+  if (!next) return;
+  hideCtxMenu();
+  resetTypeAhead();
+  selectFileItem(next, true);
+}
+
+function releaseFileFocus(item) {
+  hideCtxMenu();
+  resetTypeAhead();
+  clearFileSelection();
+  if (document.activeElement === item) item.blur();
+}
+
+function handleFileListKey(e) {
+  const item = focusedFileItem();
+  if (!item) return false;
+  if (e.isComposing || e.altKey || e.ctrlKey || e.metaKey) return false;
+  if (!$('explorer-screen').classList.contains('active')) return false;
+  if (isBlockingOverlayOpen()) return false;
+
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    hideCtxMenu();
+    activateFileItem(item);
+    return true;
+  }
+
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    releaseFileFocus(item);
+    return true;
+  }
+
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    moveFileFocus(item, e.key === 'ArrowDown' ? 1 : -1);
+    return true;
+  }
+
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    moveFileFocus(item, e.shiftKey ? -1 : 1);
+    return true;
+  }
+
+  return false;
 }
 
 function nameStartsWith(name, prefix) {
@@ -1605,7 +1752,7 @@ async function enterDockerMode(container) {
 
   navHistory   = [];
   historyIndex = -1;
-  await loadDirectory('/', true);
+  await loadDirectory('/', true, true);
 }
 
 function exitDockerMode() {
@@ -1620,7 +1767,7 @@ function exitDockerMode() {
 
   navHistory   = [];
   historyIndex = -1;
-  loadDirectory(preDockerPath, true);
+  loadDirectory(preDockerPath, true, true);
 }
 
 // ── Clipboard (server-side copy) ───────────────────────────────────────────────

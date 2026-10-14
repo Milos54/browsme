@@ -492,6 +492,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   cursor: default;
   transition: background 0.1s;
   min-width: 0;
+  outline: none;
 }
 .file-grid .file-item:hover               { background: var(--surface2); }
 .file-grid .file-item.selected            { background: rgba(88, 166, 255, 0.14); outline: 1px solid rgba(88, 166, 255, 0.35); }
@@ -532,6 +533,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   border-radius: var(--radius-sm);
   cursor: default;
   transition: background 0.1s;
+  outline: none;
 }
 .file-list .file-item:hover               { background: var(--surface2); }
 .file-list .file-item.selected            { background: rgba(88, 166, 255, 0.14); outline: 1px solid rgba(88, 166, 255, 0.35); }
