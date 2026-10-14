@@ -534,7 +534,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   transition: background 0.1s;
 }
 .file-list .file-item:hover               { background: var(--surface2); }
-.file-list .file-item.selected            { background: rgba(88, 166, 255, 0.14); }
+.file-list .file-item.selected            { background: rgba(88, 166, 255, 0.14); outline: 1px solid rgba(88, 166, 255, 0.35); }
 .file-list .file-item[data-is-dir="true"] { cursor: pointer; }
 
 .fi-icon { font-size: 16px; }

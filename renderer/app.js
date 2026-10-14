@@ -7,6 +7,12 @@ let currentFiles  = [];
 let connectionInfo = null;
 let isLoading     = false;
 
+// Windows Explorer type-ahead: letters accumulate for a short window.
+// Repeating one letter walks every name that starts with it, then wraps.
+const TYPE_AHEAD_MS = 1000;
+let typeAheadQuery = '';
+let typeAheadAt = 0;
+
 const $ = (id) => document.getElementById(id);
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
@@ -142,6 +148,7 @@ function bindExplorerControls() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename(); }
+    handleTypeAheadKey(e);
   });
 }
 
@@ -394,6 +401,7 @@ function updateBreadcrumb(dirPath) {
 
 // ── Render files ───────────────────────────────────────────────────────────────
 function renderFiles(files) {
+  resetTypeAhead();
   const container      = $('file-container');
   container.innerHTML  = '';
   container.className  = viewMode === 'list' ? 'file-list' : 'file-grid';
@@ -445,19 +453,114 @@ function renderFiles(files) {
     }
 
     item.addEventListener('click', () => {
-      container.querySelectorAll('.file-item.selected').forEach((el) => el.classList.remove('selected'));
-      item.classList.add('selected');
+      resetTypeAhead();
+      selectFileItem(item);
     });
 
     item.addEventListener('contextmenu', (e) => {
       e.stopPropagation();
-      container.querySelectorAll('.file-item.selected').forEach((el) => el.classList.remove('selected'));
-      item.classList.add('selected');
+      resetTypeAhead();
+      selectFileItem(item);
       showCtxMenu(e.clientX, e.clientY, file);
     });
 
     container.appendChild(item);
   });
+}
+
+function resetTypeAhead() {
+  typeAheadQuery = '';
+  typeAheadAt = 0;
+}
+
+function selectFileItem(item, reveal) {
+  const container = $('file-container');
+  container.querySelectorAll('.file-item.selected').forEach((el) => el.classList.remove('selected'));
+  item.classList.add('selected');
+  if (reveal) item.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function nameStartsWith(name, prefix) {
+  return String(name).toLocaleLowerCase().startsWith(String(prefix).toLocaleLowerCase());
+}
+
+// Same rules as a Windows folder: a new letter jumps to the next name that
+// starts with it (the first one when nothing is selected). Repeating that
+// letter keeps walking those names and wraps. A different letter typed
+// quickly narrows the prefix ("a" then "p" looks for "ap").
+function resolveTypeAhead(names, selectedIndex, query, ch, withinTimeout) {
+  const c = ch.toLocaleLowerCase();
+  const repeat = withinTimeout
+    && query.length > 0
+    && [...query.toLocaleLowerCase()].every((q) => q === c);
+
+  let prefix;
+  let start;
+
+  if (repeat) {
+    prefix = c;
+    start = selectedIndex + 1;
+  } else if (withinTimeout && query) {
+    prefix = query + c;
+    if (selectedIndex >= 0 && nameStartsWith(names[selectedIndex], prefix)) {
+      return { index: selectedIndex, query: prefix };
+    }
+    start = selectedIndex + 1;
+  } else {
+    prefix = c;
+    start = selectedIndex + 1;
+  }
+
+  const count = names.length;
+  if (!count) return { index: -1, query };
+
+  for (let i = 0; i < count; i++) {
+    const idx = (start + i) % count;
+    if (nameStartsWith(names[idx], prefix)) return { index: idx, query: prefix };
+  }
+
+  if (withinTimeout && query && !repeat) return { index: -1, query };
+  return { index: -1, query: prefix };
+}
+
+function isTextEntryTarget(el) {
+  if (!el || !el.tagName) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
+
+function isBlockingOverlayOpen() {
+  return ['preview-backdrop', 'hop-backdrop', 'confirm-backdrop', 'rename-backdrop', 'sudo-backdrop']
+    .some((id) => !$(id).classList.contains('hidden'));
+}
+
+function handleTypeAheadKey(e) {
+  if (e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (e.key.length !== 1) return;
+  if (!$('explorer-screen').classList.contains('active')) return;
+  if (isTextEntryTarget(e.target)) return;
+  if (isBlockingOverlayOpen()) return;
+
+  const container = $('file-container');
+  const items = Array.from(container.querySelectorAll('.file-item'));
+  if (!items.length) return;
+
+  e.preventDefault();
+
+  const now = Date.now();
+  const withinTimeout = typeAheadQuery.length > 0 && (now - typeAheadAt) <= TYPE_AHEAD_MS;
+  const names = items.map((el) => el.dataset.name || '');
+  const selected = container.querySelector('.file-item.selected');
+  const selectedIndex = selected ? items.indexOf(selected) : -1;
+  const result = resolveTypeAhead(names, selectedIndex, typeAheadQuery, e.key, withinTimeout);
+
+  typeAheadQuery = result.query;
+  typeAheadAt = now;
+
+  if (result.index >= 0) {
+    hideCtxMenu();
+    selectFileItem(items[result.index], true);
+  }
 }
 
 function setViewMode(mode) {
