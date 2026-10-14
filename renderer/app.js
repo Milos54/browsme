@@ -122,7 +122,10 @@ function bindExplorerControls() {
 
   // Context menu
   document.addEventListener('click',       hideCtxMenu);
-  document.addEventListener('contextmenu', (e) => e.preventDefault()); // block default
+  document.addEventListener('contextmenu', (e) => {
+    if (e.target && e.target.id === 'editor-text') return;
+    e.preventDefault();
+  });
   $('ctx-rename').addEventListener('click', () => { hideCtxMenu(); startRename(); });
   $('ctx-copy').addEventListener('click',   () => { hideCtxMenu(); copyToClipboard(); });
   $('ctx-delete').addEventListener('click', () => { hideCtxMenu(); startDelete(); });
@@ -146,8 +149,35 @@ function bindExplorerControls() {
   $('sudo-ok').addEventListener('click', runSudoAction);
   $('sudo-pass-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSudoAction(); });
 
+  $('elevate-cancel').addEventListener('click', cancelElevatedSave);
+  $('elevate-backdrop').addEventListener('click', (e) => { if (e.target === $('elevate-backdrop')) cancelElevatedSave(); });
+  $('elevate-ok').addEventListener('click', runElevatedSave);
+  $('elevate-user-input').addEventListener('input', refreshElevatePasswordLabel);
+  $('elevate-user-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('elevate-pass-input').focus();
+    }
+  });
+  $('elevate-pass-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runElevatedSave(); });
+
+  $('editor-save').addEventListener('click', () => saveRemoteEditor({ exitAfter: false, force: false }));
+  $('editor-exit').addEventListener('click', requestRemoteEditorExit);
+  $('editor-save-exit').addEventListener('click', () => saveRemoteEditor({ exitAfter: true, force: false }));
+  $('editor-discard-exit').addEventListener('click', discardRemoteEditor);
+  $('editor-conflict-cancel').addEventListener('click', dismissRemoteConflict);
+  $('editor-conflict-overwrite').addEventListener('click', () => {
+    saveRemoteEditor({ exitAfter: remoteEditor.pendingExit, force: true });
+  });
+  $('editor-text').addEventListener('input', refreshRemoteEditorDirty);
+  // Capture phase so Ctrl/Cmd+S and Escape are handled before the file list.
+  document.addEventListener('keydown', handleRemoteEditorKeydown, true);
+
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename(); }
+    if (e.key === 'Escape') {
+      if (remoteEditor.open) return;
+      closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename();
+    }
     handleTypeAheadKey(e);
   });
 }
@@ -448,7 +478,12 @@ function renderFiles(files) {
     } else if (!file.isSymlink) {
       item.addEventListener('dblclick', () => {
         const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-        openPreview(filePath, file.name, file.size);
+        // Container files keep the existing preview. Do not send them through SFTP editing.
+        if (dockerMode || isReadOnlyExtension(file.name)) {
+          openPreview(filePath, file.name, file.size);
+        } else {
+          openRemoteEditor(filePath, file.name, file.size);
+        }
       });
     }
 
@@ -530,8 +565,10 @@ function isTextEntryTarget(el) {
 }
 
 function isBlockingOverlayOpen() {
-  return ['preview-backdrop', 'hop-backdrop', 'confirm-backdrop', 'rename-backdrop', 'sudo-backdrop']
-    .some((id) => !$(id).classList.contains('hidden'));
+  return [
+    'preview-backdrop', 'hop-backdrop', 'confirm-backdrop', 'rename-backdrop', 'sudo-backdrop',
+    'elevate-backdrop', 'editor-backdrop', 'editor-confirm-backdrop', 'editor-conflict-backdrop',
+  ].some((id) => !$(id).classList.contains('hidden'));
 }
 
 function handleTypeAheadKey(e) {
@@ -653,25 +690,7 @@ function hideFileError() {
 
 // ── File Preview ───────────────────────────────────────────────────────────────
 async function openPreview(filePath, fileName, fileSize) {
-  const backdrop = $('preview-backdrop');
-  const icon     = $('preview-icon');
-  const nameEl   = $('preview-filename');
-  const sizeEl   = $('preview-size');
-  const loading  = $('preview-loading');
-  const errEl    = $('preview-error');
-  const content  = $('preview-content');
-
-  // Reset state
-  icon.textContent    = getFileIcon(fileName, false, false);
-  nameEl.textContent  = fileName;
-  sizeEl.textContent  = fileSize ? formatSize(fileSize) : '';
-  content.innerHTML   = '';
-  errEl.textContent   = '';
-
-  loading.classList.remove('hidden');
-  errEl.classList.add('hidden');
-  content.classList.add('hidden');
-  backdrop.classList.remove('hidden');
+  showPreviewChrome(fileName, fileSize);
 
   let result;
   try {
@@ -682,17 +701,48 @@ async function openPreview(filePath, fileName, fileSize) {
     result = { success: false, error: (err && err.message) || 'Could not read file.' };
   }
 
+  renderPreviewResult(fileName, result);
+}
+
+function showPreviewChrome(fileName, fileSize) {
+  const backdrop = $('preview-backdrop');
+  const icon     = $('preview-icon');
+  const nameEl   = $('preview-filename');
+  const sizeEl   = $('preview-size');
+  const loading  = $('preview-loading');
+  const errEl    = $('preview-error');
+  const content  = $('preview-content');
+
+  icon.textContent    = getFileIcon(fileName, false, false);
+  nameEl.textContent  = fileName;
+  sizeEl.textContent  = fileSize ? formatSize(fileSize) : '';
+  content.innerHTML   = '';
+  errEl.textContent   = '';
+
+  loading.classList.remove('hidden');
+  errEl.classList.add('hidden');
+  content.classList.add('hidden');
+  backdrop.classList.remove('hidden');
+}
+
+function renderPreviewResult(fileName, result) {
+  const loading = $('preview-loading');
+  const errEl   = $('preview-error');
+  const content = $('preview-content');
+
   loading.classList.add('hidden');
 
   if (!result || !result.success) {
     errEl.textContent = dockerSafeError(result, 'Could not read file.');
     errEl.classList.remove('hidden');
+    content.classList.add('hidden');
     return;
   }
 
   const ext = fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '';
   content.innerHTML = renderFileContent(result.content, ext);
   content.classList.remove('hidden');
+  errEl.classList.add('hidden');
 }
 
 function renderFileContent(raw, ext) {
@@ -721,6 +771,672 @@ function highlightJson(json) {
     }
   );
 }
+
+// ── Remote text editor (SFTP only) ─────────────────────────────────────────────
+const READ_ONLY_EXTENSIONS = new Set([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'tif', 'tiff',
+  'mp3', 'wav', 'flac', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm',
+  'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'rar', '7z', 'iso',
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+  'exe', 'dll', 'so', 'dylib', 'bin', 'deb', 'rpm', 'apk', 'class', 'pyc', 'o', 'a',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+]);
+
+function isReadOnlyExtension(name) {
+  const base = String(name || '').split('/').pop();
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) return false;
+  return READ_ONLY_EXTENSIONS.has(base.slice(dot + 1).toLowerCase());
+}
+
+const remoteEditor = {
+  gen: 0,
+  open: false,
+  loaded: false,
+  saving: false,
+  pendingExit: false,
+  path: '',
+  baseline: '',
+  newline: 'lf',
+  mtime: null,
+  size: null,
+  sessionKey: '',
+  statusTimer: null,
+};
+
+function currentSessionKey() {
+  if (!connectionInfo) return '';
+  return `${connectionInfo.username}@${connectionInfo.host}:${connectionInfo.port || 22}`;
+}
+
+function captureCaret(el) {
+  return {
+    start: el.selectionStart,
+    end: el.selectionEnd,
+    scrollTop: el.scrollTop,
+    scrollLeft: el.scrollLeft,
+  };
+}
+
+function restoreCaret(el, caret) {
+  if (!caret || !el) return;
+  el.focus();
+  const max = el.value.length;
+  const start = Math.min(caret.start || 0, max);
+  const end = Math.min(caret.end || 0, max);
+  el.setSelectionRange(start, end);
+  el.scrollTop = caret.scrollTop;
+  el.scrollLeft = caret.scrollLeft;
+}
+
+function setConfirmError(msg) {
+  const el = $('editor-confirm-error');
+  if (!msg) {
+    el.textContent = '';
+    el.classList.add('hidden');
+    return;
+  }
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
+function setRemoteEditorStatus(kind, message) {
+  if (remoteEditor.statusTimer) {
+    clearTimeout(remoteEditor.statusTimer);
+    remoteEditor.statusTimer = null;
+  }
+  const el = $('editor-status');
+  el.className = 'editor-status' + (kind ? ` editor-status-${kind}` : '');
+  el.textContent = message || '';
+  el.title = message || '';
+  if (kind === 'ok' && message) {
+    const gen = remoteEditor.gen;
+    const shown = message;
+    remoteEditor.statusTimer = setTimeout(() => {
+      if (remoteEditor.gen !== gen) return;
+      if (el.textContent === shown) {
+        el.textContent = '';
+        el.className = 'editor-status';
+      }
+    }, 2200);
+  }
+}
+
+function setRemoteEditorSaving(on) {
+  $('editor-save').disabled = on || !remoteEditor.loaded;
+  $('editor-exit').disabled = on;
+  $('editor-save-exit').disabled = on;
+  $('editor-discard-exit').disabled = on;
+  $('editor-conflict-overwrite').disabled = on;
+  $('editor-text').readOnly = on;
+  $('editor-save').textContent = on ? 'Saving…' : 'Save';
+  $('editor-save-exit').textContent = on ? 'Saving…' : 'Save and exit';
+  $('editor-conflict-overwrite').textContent = on ? 'Saving…' : 'Overwrite';
+  $('editor-backdrop').setAttribute('aria-busy', on ? 'true' : 'false');
+}
+
+function refreshRemoteEditorDirty() {
+  const badge = $('editor-dirty');
+  if (!remoteEditor.open || !remoteEditor.loaded) {
+    badge.classList.add('hidden');
+    return;
+  }
+  const dirty = window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
+  badge.classList.toggle('hidden', !dirty);
+}
+
+function showUnsavedDialog() {
+  $('editor-confirm-backdrop').classList.remove('hidden');
+  setTimeout(() => {
+    if (!remoteEditor.open || remoteEditor.saving) return;
+    if (!$('editor-conflict-backdrop').classList.contains('hidden')) return;
+    $('editor-save-exit').focus();
+  }, 0);
+}
+
+function dismissUnsavedDialog() {
+  $('editor-confirm-backdrop').classList.add('hidden');
+  setConfirmError('');
+  if (remoteEditor.open && remoteEditor.loaded && $('editor-conflict-backdrop').classList.contains('hidden') && !remoteEditor.saving) {
+    $('editor-text').focus();
+  }
+}
+
+function showRemoteConflict(message) {
+  $('editor-conflict-msg').textContent = message;
+  $('editor-conflict-backdrop').classList.remove('hidden');
+  setTimeout(() => {
+    if (!remoteEditor.open || remoteEditor.saving) return;
+    $('editor-conflict-cancel').focus();
+  }, 0);
+}
+
+function dismissRemoteConflict() {
+  $('editor-conflict-backdrop').classList.add('hidden');
+  if (!remoteEditor.open) return;
+  if (!$('editor-confirm-backdrop').classList.contains('hidden')) {
+    $('editor-save-exit').focus();
+    return;
+  }
+  if (remoteEditor.loaded) $('editor-text').focus();
+}
+
+function closeRemoteEditor() {
+  remoteEditor.gen += 1;
+  remoteEditor.open = false;
+  remoteEditor.loaded = false;
+  remoteEditor.saving = false;
+  remoteEditor.pendingExit = false;
+  remoteEditor.path = '';
+  remoteEditor.baseline = '';
+  remoteEditor.newline = 'lf';
+  remoteEditor.mtime = null;
+  remoteEditor.size = null;
+  remoteEditor.sessionKey = '';
+  if (remoteEditor.statusTimer) {
+    clearTimeout(remoteEditor.statusTimer);
+    remoteEditor.statusTimer = null;
+  }
+  $('editor-text').value = '';
+  $('editor-text').classList.add('hidden');
+  $('editor-loading').classList.add('hidden');
+  $('editor-load-error').classList.add('hidden');
+  $('editor-load-error').textContent = '';
+  $('editor-backdrop').classList.add('hidden');
+  $('editor-confirm-backdrop').classList.add('hidden');
+  $('editor-conflict-backdrop').classList.add('hidden');
+  closeElevate();
+  $('editor-dirty').classList.add('hidden');
+  setConfirmError('');
+  const status = $('editor-status');
+  status.textContent = '';
+  status.title = '';
+  status.className = 'editor-status';
+  setRemoteEditorSaving(false);
+}
+
+function requestRemoteEditorExit() {
+  if (!remoteEditor.open || remoteEditor.saving) return;
+  if (elevateDialogOpen()) return;
+  const dirty = remoteEditor.loaded
+    && window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
+  if (!dirty) {
+    closeRemoteEditor();
+    return;
+  }
+  setConfirmError('');
+  showUnsavedDialog();
+}
+
+function discardRemoteEditor() {
+  if (remoteEditor.saving) return;
+  closeRemoteEditor();
+}
+
+async function openRemoteEditor(filePath, fileName, fileSize) {
+  const api = window.editorState;
+  const gen = ++remoteEditor.gen;
+  remoteEditor.open = true;
+  remoteEditor.loaded = false;
+  remoteEditor.saving = false;
+  remoteEditor.pendingExit = false;
+  remoteEditor.path = filePath;
+  remoteEditor.baseline = '';
+  remoteEditor.newline = 'lf';
+  remoteEditor.mtime = null;
+  remoteEditor.size = null;
+  remoteEditor.sessionKey = currentSessionKey();
+
+  closePreview();
+  $('editor-confirm-backdrop').classList.add('hidden');
+  $('editor-conflict-backdrop').classList.add('hidden');
+  setConfirmError('');
+  setRemoteEditorStatus('', '');
+
+  $('editor-icon').textContent = getFileIcon(fileName, false, false);
+  $('editor-filename').textContent = fileName;
+  $('editor-filename').title = fileName;
+  $('editor-path').textContent = filePath;
+  $('editor-path').title = filePath;
+  $('editor-dirty').classList.add('hidden');
+  $('editor-text').value = '';
+  $('editor-text').classList.add('hidden');
+  $('editor-load-error').textContent = '';
+  $('editor-load-error').classList.add('hidden');
+  $('editor-loading').classList.remove('hidden');
+  $('editor-backdrop').classList.remove('hidden');
+  setRemoteEditorSaving(false);
+
+  let result;
+  try {
+    result = await window.api.readfile(filePath);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Could not read file.' };
+  }
+
+  if (!remoteEditor.open || gen !== remoteEditor.gen) return;
+
+  if (api.isPreviewOnlyRead(result)) {
+    closeRemoteEditor();
+    showPreviewChrome(fileName, fileSize);
+    renderPreviewResult(fileName, result);
+    return;
+  }
+
+  $('editor-loading').classList.add('hidden');
+
+  if (!result || !result.success || typeof result.content !== 'string') {
+    $('editor-load-error').textContent = (result && result.error) || 'Could not read file.';
+    $('editor-load-error').classList.remove('hidden');
+    $('editor-save').disabled = true;
+    $('editor-exit').focus();
+    return;
+  }
+
+  remoteEditor.newline = api.classifyNewlines(result.content);
+  const area = $('editor-text');
+  area.value = api.toEditorText(result.content);
+  remoteEditor.baseline = area.value;
+  remoteEditor.mtime = Number.isFinite(result.mtime) ? result.mtime : null;
+  remoteEditor.size = Number.isFinite(result.size) ? result.size : null;
+  remoteEditor.loaded = true;
+  remoteEditor.sessionKey = currentSessionKey();
+  area.classList.remove('hidden');
+  refreshRemoteEditorDirty();
+  setRemoteEditorSaving(false);
+  area.setSelectionRange(0, 0);
+  area.focus();
+}
+
+let pendingElevateAction = null;
+
+function elevateDialogOpen() {
+  return !$('elevate-backdrop').classList.contains('hidden');
+}
+
+function refreshElevatePasswordLabel() {
+  const name = $('elevate-user-input').value.trim() || 'this account';
+  $('elevate-pass-label').textContent = `Password for ${name}`;
+}
+
+function closeElevate() {
+  $('elevate-backdrop').classList.add('hidden');
+  $('elevate-user-input').value = '';
+  $('elevate-pass-input').value = '';
+  $('elevate-user-input').disabled = false;
+  $('elevate-pass-input').disabled = false;
+  $('elevate-cancel').disabled = false;
+  $('elevate-error').textContent = '';
+  $('elevate-error').classList.add('hidden');
+  $('elevate-ok').disabled = false;
+  $('elevate-ok-text').textContent = 'Save';
+  $('elevate-spinner').classList.add('hidden');
+  pendingElevateAction = null;
+}
+
+function cancelElevatedSave() {
+  if ($('elevate-ok').disabled) return;
+  const wasOpen = elevateDialogOpen();
+  closeElevate();
+  if (!wasOpen || !remoteEditor.open) return;
+  setRemoteEditorStatus('error', 'Not saved. Your changes are still in the editor.');
+  if (remoteEditor.loaded && $('editor-conflict-backdrop').classList.contains('hidden')
+      && $('editor-confirm-backdrop').classList.contains('hidden') && !remoteEditor.saving) {
+    $('editor-text').focus();
+  }
+}
+
+function openElevateModal(prompt, action) {
+  pendingElevateAction = action;
+  $('elevate-msg').textContent = prompt.message;
+  $('elevate-user-input').value = prompt.username || 'root';
+  $('elevate-pass-input').value = '';
+  $('elevate-error').textContent = '';
+  $('elevate-error').classList.add('hidden');
+  $('elevate-ok').disabled = false;
+  $('elevate-ok-text').textContent = 'Save';
+  $('elevate-spinner').classList.add('hidden');
+  refreshElevatePasswordLabel();
+  $('elevate-backdrop').classList.remove('hidden');
+  setTimeout(() => {
+    if (!elevateDialogOpen()) return;
+    $('elevate-pass-input').focus();
+  }, 50);
+}
+
+async function runElevatedSave() {
+  if (!pendingElevateAction) return;
+  const username = $('elevate-user-input').value.trim();
+  const password = $('elevate-pass-input').value;
+  if (!window.editorState.isSafeAccountName(username)) {
+    $('elevate-error').textContent = 'Enter the name of an account that can write this file.';
+    $('elevate-error').classList.remove('hidden');
+    $('elevate-user-input').focus();
+    return;
+  }
+  if (!password) {
+    $('elevate-error').textContent = `Enter the password for ${username}.`;
+    $('elevate-error').classList.remove('hidden');
+    $('elevate-pass-input').focus();
+    return;
+  }
+
+  $('elevate-ok').disabled = true;
+  $('elevate-cancel').disabled = true;
+  $('elevate-user-input').disabled = true;
+  $('elevate-pass-input').disabled = true;
+  $('elevate-ok-text').textContent = 'Saving…';
+  $('elevate-spinner').classList.remove('hidden');
+  $('elevate-error').classList.add('hidden');
+
+  let result;
+  try {
+    result = await pendingElevateAction(username, password);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Save failed.' };
+  }
+
+  $('elevate-ok').disabled = false;
+  $('elevate-cancel').disabled = false;
+  $('elevate-user-input').disabled = false;
+  $('elevate-pass-input').disabled = false;
+  $('elevate-ok-text').textContent = 'Save';
+  $('elevate-spinner').classList.add('hidden');
+
+  if (result && (result.success || result.conflict)) {
+    const saved = !!result.success;
+    closeElevate();
+    if (saved) loadDirectory(currentPath, false);
+    return;
+  }
+
+  $('elevate-error').textContent = result && result.wrongPassword
+    ? `Incorrect password for ${username}. The file was not changed.`
+    : ((result && result.error) || 'The file was not changed.');
+  $('elevate-error').classList.remove('hidden');
+  $('elevate-pass-input').value = '';
+  $('elevate-pass-input').focus();
+}
+
+function promptElevatedSave(exitAfter, force, caret, info) {
+  const prompt = window.editorState.elevationPrompt(info || {});
+  openElevateModal(prompt, async (username, password) => {
+    const api = window.editorState;
+    const area = $('editor-text');
+    if (!remoteEditor.open || !remoteEditor.loaded) {
+      return { success: false, error: 'This file is not open for editing.' };
+    }
+    if (!api.sameEditingSession(remoteEditor.sessionKey, currentSessionKey())) {
+      return { success: false, error: api.CONNECTION_LOST_MESSAGE };
+    }
+
+    const text = area.value;
+    remoteEditor.saving = true;
+    setRemoteEditorSaving(true);
+    let result;
+    try {
+      result = await window.api.writefileAs(
+        remoteEditor.path,
+        api.prepareForSave(text, remoteEditor.newline),
+        username,
+        password,
+        {
+          expectedMtime: remoteEditor.mtime,
+          expectedSize: remoteEditor.size,
+          force,
+        }
+      );
+    } catch (err) {
+      result = { success: false, error: (err && err.message) || 'Save failed.' };
+    } finally {
+      if (remoteEditor.open) {
+        remoteEditor.saving = false;
+        setRemoteEditorSaving(false);
+      }
+    }
+
+    if (!remoteEditor.open) return result || { success: false, error: 'Save failed.' };
+
+    if (result && result.conflict) {
+      const msg = result.error || 'The remote file has changed since you opened or last saved it. It was not overwritten.';
+      setRemoteEditorStatus('error', msg);
+      showRemoteConflict(msg);
+      return result;
+    }
+    if (!result || !result.success) return result || { success: false, error: 'Save failed.' };
+
+    const applied = api.applySaveResult(remoteEditor.baseline, text, result);
+    remoteEditor.baseline = applied.baseline;
+    remoteEditor.mtime = applied.mtime;
+    remoteEditor.size = applied.size;
+    refreshRemoteEditorDirty();
+    dismissUnsavedDialog();
+    dismissRemoteConflict();
+    setRemoteEditorStatus('ok', 'Saved');
+    if (exitAfter) closeRemoteEditor();
+    else restoreCaret(area, caret);
+    return result;
+  });
+}
+
+async function saveRemoteEditor(opts) {
+  const exitAfter = !!(opts && opts.exitAfter);
+  const force = !!(opts && opts.force);
+  if (!remoteEditor.open || remoteEditor.saving || elevateDialogOpen()) return;
+
+  const api = window.editorState;
+  const area = $('editor-text');
+  remoteEditor.pendingExit = exitAfter;
+
+  if (!remoteEditor.loaded) {
+    setRemoteEditorStatus('error', 'This file is not open for editing.');
+    return;
+  }
+
+  const text = area.value;
+  if (api.saveAction(text, remoteEditor.baseline) === 'skip') {
+    setRemoteEditorStatus('ok', 'No changes to save');
+    refreshRemoteEditorDirty();
+    if (exitAfter) closeRemoteEditor();
+    else dismissUnsavedDialog();
+    return;
+  }
+
+  if (!api.sameEditingSession(remoteEditor.sessionKey, currentSessionKey())) {
+    setRemoteEditorStatus('error', api.CONNECTION_LOST_MESSAGE);
+    if (exitAfter || !$('editor-confirm-backdrop').classList.contains('hidden')) {
+      setConfirmError(api.CONNECTION_LOST_MESSAGE);
+      showUnsavedDialog();
+    }
+    return;
+  }
+
+  const caret = captureCaret(area);
+  const gen = remoteEditor.gen;
+  const keepConfirm = exitAfter || !$('editor-confirm-backdrop').classList.contains('hidden');
+  remoteEditor.saving = true;
+  setRemoteEditorSaving(true);
+  setRemoteEditorStatus('progress', 'Saving…');
+  if (keepConfirm) setConfirmError('');
+
+  try {
+    const content = api.prepareForSave(text, remoteEditor.newline);
+    const result = await window.api.writefile(remoteEditor.path, content, {
+      expectedMtime: remoteEditor.mtime,
+      expectedSize: remoteEditor.size,
+      force,
+    });
+
+    if (!remoteEditor.open || gen !== remoteEditor.gen) return;
+
+    if (result && result.conflict) {
+      const msg = result.error || 'The remote file has changed since you opened or last saved it. It was not overwritten.';
+      setRemoteEditorStatus('error', msg);
+      if (keepConfirm) setConfirmError(msg);
+      showRemoteConflict(msg);
+      return;
+    }
+
+    if (result && result.needsElevation) {
+      const prompt = window.editorState.elevationPrompt(result);
+      setRemoteEditorStatus('error', `Permission denied. Enter the password for ${prompt.username} to save.`);
+      promptElevatedSave(exitAfter, force, caret, result);
+      return;
+    }
+
+    const applied = api.applySaveResult(remoteEditor.baseline, text, result);
+    if (!applied.saved) {
+      const msg = (result && result.error) || 'Save failed.';
+      const lost = /not connected|connection was lost|connection lost/i.test(msg);
+      const shown = lost ? api.CONNECTION_LOST_MESSAGE : msg;
+      setRemoteEditorStatus('error', shown);
+      dismissRemoteConflict();
+      if (keepConfirm) {
+        setConfirmError(shown);
+        showUnsavedDialog();
+      } else {
+        restoreCaret(area, caret);
+      }
+      return;
+    }
+
+    remoteEditor.baseline = applied.baseline;
+    remoteEditor.mtime = applied.mtime;
+    remoteEditor.size = applied.size;
+    refreshRemoteEditorDirty();
+    dismissUnsavedDialog();
+    dismissRemoteConflict();
+    setRemoteEditorStatus('ok', 'Saved');
+    if (exitAfter) {
+      closeRemoteEditor();
+      return;
+    }
+    restoreCaret(area, caret);
+  } catch (err) {
+    if (!remoteEditor.open || gen !== remoteEditor.gen) return;
+    const msg = (err && err.message) || 'Save failed.';
+    setRemoteEditorStatus('error', msg);
+    dismissRemoteConflict();
+    if (keepConfirm) {
+      setConfirmError(msg);
+      showUnsavedDialog();
+    } else {
+      restoreCaret(area, caret);
+    }
+  } finally {
+    if (remoteEditor.open && gen === remoteEditor.gen) {
+      remoteEditor.saving = false;
+      setRemoteEditorSaving(false);
+    }
+  }
+}
+
+function insertEditorTab(el) {
+  const scrollTop = el.scrollTop;
+  const scrollLeft = el.scrollLeft;
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  if (typeof el.setRangeText === 'function') {
+    el.setRangeText('\t', start, end, 'end');
+  } else {
+    el.value = el.value.slice(0, start) + '\t' + el.value.slice(end);
+    el.setSelectionRange(start + 1, start + 1);
+  }
+  el.scrollTop = scrollTop;
+  el.scrollLeft = scrollLeft;
+}
+
+function trapDialogTab(e, dialog) {
+  const focusables = Array.from(dialog.querySelectorAll('button:not([disabled])'));
+  if (!focusables.length) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey && (active === first || !dialog.contains(active))) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (active === last || !dialog.contains(active))) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function handleRemoteEditorKeydown(e) {
+  if (!remoteEditor.open) return;
+
+  if (!$('elevate-backdrop').classList.contains('hidden')) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelElevatedSave();
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && String(e.key).toLowerCase() === 's') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+
+  if (!$('sudo-backdrop').classList.contains('hidden')) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeSudo();
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && String(e.key).toLowerCase() === 's') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    return;
+  }
+
+  const confirmOpen = !$('editor-confirm-backdrop').classList.contains('hidden');
+  const conflictOpen = !$('editor-conflict-backdrop').classList.contains('hidden');
+
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && String(e.key).toLowerCase() === 's') {
+    e.preventDefault();
+    e.stopPropagation();
+    if (remoteEditor.saving || conflictOpen) return;
+    saveRemoteEditor({ exitAfter: false, force: false });
+    return;
+  }
+
+  if (e.key === 'Tab') {
+    if (conflictOpen) {
+      trapDialogTab(e, $('editor-conflict-backdrop'));
+      return;
+    }
+    if (confirmOpen) {
+      trapDialogTab(e, $('editor-confirm-backdrop'));
+      return;
+    }
+    if (e.target === $('editor-text') && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      insertEditorTab($('editor-text'));
+      refreshRemoteEditorDirty();
+    }
+    return;
+  }
+
+  if (e.key !== 'Escape') return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (remoteEditor.saving) return;
+  if (conflictOpen) {
+    dismissRemoteConflict();
+    return;
+  }
+  if (confirmOpen) {
+    dismissUnsavedDialog();
+    return;
+  }
+  requestRemoteEditorExit();
+}
+
+$('editor-backdrop').addEventListener('dragover', (e) => {
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) e.preventDefault();
+});
+$('editor-backdrop').addEventListener('drop', (e) => {
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) e.preventDefault();
+});
 
 // ── Rename ─────────────────────────────────────────────────────────────────────
 function startRename() {
@@ -1053,9 +1769,10 @@ async function runDelete() {
 let pendingSudoAction = null; // async (password) => { success, wrongPassword, error }
 let sudoActionLabel   = 'Confirm';
 
-function openSudoModal(itemName, actionLabel, action) {
+function openSudoModal(itemName, actionLabel, action, verb) {
   pendingSudoAction = action;
   sudoActionLabel   = actionLabel;
+  $('sudo-verb').textContent = verb || 'Deleting';
   $('sudo-item-name').textContent  = itemName || '';
   $('sudo-pass-input').value       = '';
   $('sudo-error').classList.add('hidden');
@@ -1086,21 +1803,31 @@ async function runSudoAction() {
   $('sudo-spinner').classList.remove('hidden');
   $('sudo-error').classList.add('hidden');
 
-  const result = await pendingSudoAction(pass);
+  let result;
+  try {
+    result = await pendingSudoAction(pass);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Operation failed.' };
+  }
 
   $('sudo-ok').disabled            = false;
   $('sudo-ok-text').textContent    = sudoActionLabel;
   $('sudo-spinner').classList.add('hidden');
 
-  if (result.success) {
+  if (result && result.conflict) {
+    closeSudo();
+    return;
+  }
+
+  if (result && result.success) {
     closeSudo();
     loadDirectory(currentPath, false);
     return;
   }
 
-  $('sudo-error').textContent = result.wrongPassword
+  $('sudo-error').textContent = result && result.wrongPassword
     ? 'Incorrect sudo password. Try again.'
-    : (result.error || 'Operation failed.');
+    : ((result && result.error) || 'Operation failed.');
   $('sudo-error').classList.remove('hidden');
   $('sudo-pass-input').value = '';
   $('sudo-pass-input').focus();

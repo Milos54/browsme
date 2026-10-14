@@ -1,6 +1,17 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
+const crypto = require('crypto');
 const path = require('path');
 const { Client } = require('ssh2');
+const {
+  assessRemoteChange,
+  chooseWriteAccount,
+  formatFileMode,
+  parseAccountFacts,
+  isSafeAccountName,
+  passwordPromptCount,
+  isSuAuthFailure,
+  usefulTerminalError,
+} = require('./renderer/editor-state');
 
 let mainWindow   = null;
 let jumpClient   = null;   // first-hop (bastion) — null when not used
@@ -259,16 +270,96 @@ ipcMain.handle('ssh:copy-sudo', async (_event, { srcPath, dstPath, password }) =
 });
 
 // ── SSH: Delete (try normal first, report if sudo needed) ─────────────────────
-function runExec(cmd, stdinData) {
+function runExec(cmd, stdinData, opts) {
   return new Promise((resolve) => {
     if (!sshClient) { resolve({ code: -1, stdout: '', stderr: 'Not connected' }); return; }
+    const timeoutMs = opts && opts.timeoutMs;
+    let settled = false;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
     sshClient.exec(cmd, (err, stream) => {
-      if (err) { resolve({ code: -1, stdout: '', stderr: err.message }); return; }
+      if (err) { finish({ code: -1, stdout: '', stderr: err.message }); return; }
+      if (timeoutMs) {
+        timer = setTimeout(() => {
+          endChannel(stream);
+          finish({ code: -1, stdout: '', stderr: 'The server did not answer in time.' });
+        }, timeoutMs);
+      }
       let stdout = '', stderr = '';
       stream.on('data', (d) => { stdout += d.toString(); });
       stream.stderr.on('data', (d) => { stderr += d.toString(); });
       if (stdinData !== undefined) { stream.write(stdinData + '\n'); stream.end(); }
-      stream.on('close', (code) => resolve({ code, stdout, stderr }));
+      stream.on('close', (code) => finish({ code, stdout, stderr }));
+    });
+  });
+}
+
+function endChannel(stream) {
+  if (!stream) return;
+  try { stream.end(); } catch { /* already closed */ }
+  try {
+    if (typeof stream.close === 'function') stream.close();
+  } catch { /* already closed */ }
+}
+
+// su reads the target account's password from a terminal. A PTY is required;
+// piping the password on stdin (the way sudo -S works) is ignored.
+function runPty(cmd, password, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    if (!sshClient) {
+      resolve({ code: -1, output: 'Not connected', promptCount: 0 });
+      return;
+    }
+    const state = { output: '', prompts: 0, stream: null };
+    let settled = false;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    timer = setTimeout(() => {
+      endChannel(state.stream);
+      const output = state.output || 'Timed out while switching user to save the file.';
+      finish({ code: -1, output, promptCount: state.prompts });
+    }, timeoutMs);
+
+    sshClient.exec(cmd, { pty: { term: 'vt100', cols: 80, rows: 24 } }, (err, channel) => {
+      if (err) {
+        finish({ code: -1, output: err.message, promptCount: 0 });
+        return;
+      }
+      state.stream = channel;
+      const take = (chunk) => {
+        state.output += chunk.toString('utf8');
+        const seen = passwordPromptCount(state.output);
+        if (seen <= state.prompts) return;
+        state.prompts = seen;
+        if (state.prompts === 1 && password) {
+          channel.write(`${password}\n`);
+        } else if (state.prompts > 1) {
+          // su asks again only after the password is rejected.
+          endChannel(channel);
+        }
+      };
+      channel.on('data', take);
+      channel.stderr.on('data', take);
+      channel.on('error', (streamErr) => {
+        finish({
+          code: -1,
+          output: `${state.output}${streamErr.message}`,
+          promptCount: state.prompts,
+        });
+      });
+      channel.on('close', (code) => {
+        finish({ code: code == null ? -1 : code, output: state.output, promptCount: state.prompts });
+      });
     });
   });
 }
@@ -619,6 +710,334 @@ ipcMain.handle('ssh:upload', (_event, { localPath, remotePath }) => {
 // ── SSH: Read file contents ───────────────────────────────────────────────────
 const MAX_PREVIEW_BYTES = 1024 * 1024; // 1 MB
 
+function isValidUtf8(buffer) {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+    return true;
+  } catch (err) {
+    // Invalid UTF-8 throws TypeError. Any other failure should not block editing.
+    return !(err && err.name === 'TypeError');
+  }
+}
+
+function statRemote(sftp, filePath) {
+  return new Promise((resolve, reject) => {
+    sftp.stat(filePath, (err, stats) => (err ? reject(err) : resolve(stats)));
+  });
+}
+
+function isPermissionError(err) {
+  const msg = typeof err === 'string' ? err : (err && err.message) || '';
+  if (err && err.code === 3) return true;
+  return /permission denied|operation not permitted|eacces/i.test(msg);
+}
+
+function openHandle(sftp, filePath, flags) {
+  return new Promise((resolve, reject) => {
+    sftp.open(filePath, flags, (err, handle) => (err ? reject(err) : resolve(handle)));
+  });
+}
+
+function closeHandle(sftp, handle) {
+  return new Promise((resolve) => {
+    sftp.close(handle, () => resolve());
+  });
+}
+
+function writeHandle(sftp, handle, buffer) {
+  return new Promise((resolve, reject) => {
+    if (!buffer.length) {
+      resolve();
+      return;
+    }
+    sftp.write(handle, buffer, 0, buffer.length, 0, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function setHandleSize(sftp, handle, size) {
+  return new Promise((resolve, reject) => {
+    sftp.fsetstat(handle, { size }, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+// Write an existing file without O_CREAT. Create+truncate is rejected with
+// "Permission denied" on files that are writable when the directory is not.
+async function writeRemoteFile(sftp, filePath, buffer, previousSize) {
+  const SSH_FXF_WRITE = 0x00000002;
+  let handle = null;
+  try {
+    handle = await openHandle(sftp, filePath, SSH_FXF_WRITE);
+  } catch (err) {
+    if (isPermissionError(err)) {
+      err.needsSudo = true;
+      throw err;
+    }
+    await writeTruncating(sftp, filePath, buffer);
+    return;
+  }
+
+  try {
+    await writeHandle(sftp, handle, buffer);
+    if (Number.isFinite(previousSize) && buffer.length < previousSize) {
+      try {
+        await setHandleSize(sftp, handle, buffer.length);
+      } catch (err) {
+        if (isPermissionError(err)) {
+          err.needsSudo = true;
+          throw err;
+        }
+        await closeHandle(sftp, handle);
+        handle = null;
+        await writeTruncating(sftp, filePath, buffer);
+      }
+    }
+  } finally {
+    if (handle) await closeHandle(sftp, handle);
+  }
+}
+
+function writeTruncating(sftp, filePath, buffer) {
+  return new Promise((resolve, reject) => {
+    sftp.writeFile(filePath, buffer, { flag: 'w' }, (err) => {
+      if (!err) {
+        resolve();
+        return;
+      }
+      if (isPermissionError(err)) err.needsSudo = true;
+      reject(err);
+    });
+  });
+}
+
+function writeTempFile(sftp, tmpPath, buffer) {
+  return new Promise((resolve, reject) => {
+    sftp.writeFile(tmpPath, buffer, { flag: 'w', mode: 0o600 }, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function unlinkRemote(sftp, filePath) {
+  return new Promise((resolve) => {
+    if (!sftp) {
+      resolve();
+      return;
+    }
+    sftp.unlink(filePath, () => resolve());
+  });
+}
+
+async function prepareRemoteWrite(sftp, payload) {
+  const filePath = payload && payload.path;
+  const content = payload && payload.content;
+  if (typeof filePath !== 'string' || !filePath) {
+    return { error: { success: false, error: 'A remote file path is required.' } };
+  }
+  if (typeof content !== 'string') {
+    return { error: { success: false, error: 'File content must be text.' } };
+  }
+  if (content.includes('\0')) {
+    return { error: { success: false, error: 'The text contains binary data and was not saved.' } };
+  }
+
+  const buffer = Buffer.from(content, 'utf8');
+  if (buffer.length > MAX_PREVIEW_BYTES) {
+    return { error: { success: false, error: 'File is too large to save. Limit is 1 MB.' } };
+  }
+  if (sftpSession !== sftp) {
+    return { error: { success: false, error: 'Saving is unavailable because the connection was lost.' } };
+  }
+
+  const stats = await statRemote(sftp, filePath);
+  if (sftpSession !== sftp) {
+    return { error: { success: false, error: 'Saving is unavailable because the connection was lost.' } };
+  }
+  const S_IFMT = 0o170000;
+  const S_IFREG = 0o100000;
+  if (stats.mode && (stats.mode & S_IFMT) !== S_IFREG) {
+    return { error: { success: false, error: 'Only regular files can be edited.' } };
+  }
+
+  const remoteMtime = typeof stats.mtime === 'number' ? stats.mtime : null;
+  const remoteSize = typeof stats.size === 'number' ? stats.size : null;
+  const change = assessRemoteChange({
+    expectedMtime: payload.expectedMtime,
+    expectedSize: payload.expectedSize,
+    remoteMtime,
+    remoteSize,
+    force: payload.force === true,
+  });
+  if (change.conflict) {
+    return {
+      error: { success: false, conflict: true, error: change.error, mtime: remoteMtime, size: remoteSize },
+    };
+  }
+
+  return { filePath, buffer, previousSize: remoteSize };
+}
+
+async function savedFileResult(sftp, filePath, fallbackSize) {
+  let after = null;
+  try {
+    after = await statRemote(sftp, filePath);
+  } catch {
+    after = null;
+  }
+  return {
+    success: true,
+    mtime: after && typeof after.mtime === 'number' ? after.mtime : null,
+    size: after && typeof after.size === 'number' ? after.size : fallbackSize,
+  };
+}
+
+function saveFailure(err) {
+  const msg = (err && err.message) || 'Save failed';
+  if (!sftpSession || /no response from server|not connected|connection lost/i.test(msg)) {
+    return { success: false, error: 'Saving is unavailable because the connection was lost.' };
+  }
+  // The SSH account cannot write. The editor asks for an account that can
+  // and saves with su. This is not a sudo prompt.
+  if (err && (err.needsSudo || isPermissionError(err))) {
+    return { success: false, needsElevation: true, error: 'Permission denied' };
+  }
+  return { success: false, error: msg };
+}
+
+function accountFactsCommand(uid, gid) {
+  const uidArg = Number.isInteger(uid) && uid >= 0 ? String(uid) : '-1';
+  const gidArg = Number.isInteger(gid) && gid >= 0 ? String(gid) : '-1';
+  return [
+    'u=$(id -un 2>/dev/null || true)',
+    'printf \'CURRENT %s\\n\' "$u"',
+    'uidmin=$(awk \'$1=="UID_MIN" { print $2; exit }\' /etc/login.defs 2>/dev/null || true)',
+    'printf \'UIDMIN %s\\n\' "$uidmin"',
+    'if command -v getent >/dev/null 2>&1; then',
+    `  pw=$(getent passwd ${uidArg} 2>/dev/null || true)`,
+    `  gr=$(getent group ${gidArg} 2>/dev/null || true)`,
+    'else',
+    `  pw=$(awk -F: -v id=${uidArg} '$3==id { print; exit }' /etc/passwd 2>/dev/null || true)`,
+    `  gr=$(awk -F: -v id=${gidArg} '$3==id { print; exit }' /etc/group 2>/dev/null || true)`,
+    'fi',
+    'printf \'PASSWD %s\\n\' "$pw"',
+    'members=$(printf \'%s\' "$gr" | awk -F: \'{ print $4 }\')',
+    'count=0',
+    'oldifs=$IFS',
+    'IFS=,',
+    'for name in $members; do',
+    '  [ -n "$name" ] || continue',
+    '  count=$((count + 1))',
+    '  [ "$count" -le 40 ] || break',
+    '  if command -v getent >/dev/null 2>&1; then',
+    '    ent=$(getent passwd "$name" 2>/dev/null || true)',
+    '  else',
+    '    ent=$(awk -F: -v n="$name" \'$1==n { print; exit }\' /etc/passwd 2>/dev/null || true)',
+    '  fi',
+    '  printf \'MEMBER %s\\n\' "$ent"',
+    'done',
+    'IFS=$oldifs',
+  ].join('\n');
+}
+
+async function describeElevation(filePath) {
+  const fallback = {
+    writeUser: 'root',
+    writeVia: 'root',
+    ownerName: '',
+    ownerUid: null,
+    modeText: '',
+    currentUser: '',
+  };
+  if (!sftpSession || !sshClient || typeof filePath !== 'string' || !filePath) return fallback;
+
+  let stats = null;
+  try {
+    stats = await statRemote(sftpSession, filePath);
+  } catch {
+    stats = null;
+  }
+  const uid = stats && Number.isInteger(stats.uid) ? stats.uid : null;
+  const gid = stats && Number.isInteger(stats.gid) ? stats.gid : null;
+  const mode = stats && Number.isInteger(stats.mode) ? stats.mode : null;
+
+  let facts = { currentUser: '', owner: null, groupMembers: [], uidMin: null };
+  try {
+    const { stdout } = await runExec(accountFactsCommand(uid, gid), undefined, { timeoutMs: 8000 });
+    facts = parseAccountFacts(stdout);
+  } catch {
+    facts = { currentUser: '', owner: null, groupMembers: [], uidMin: null };
+  }
+
+  const choice = chooseWriteAccount({
+    mode: mode == null ? 0 : mode,
+    currentUser: facts.currentUser,
+    owner: facts.owner,
+    groupMembers: facts.groupMembers,
+    uidMin: facts.uidMin,
+  });
+  return {
+    writeUser: choice.username,
+    writeVia: choice.via,
+    ownerName: facts.owner && facts.owner.name || '',
+    ownerUid: uid,
+    modeText: mode == null ? '' : formatFileMode(mode),
+    currentUser: facts.currentUser,
+  };
+}
+
+function redactSecret(text, secret) {
+  const raw = String(text || '');
+  if (typeof secret !== 'string' || secret.length < 1) return raw;
+  return raw.split(secret).join('');
+}
+
+// Overwrite the existing inode. dd (or a shell redirect) truncates in place,
+// so the owner and mode stay as they are. The destination is never removed.
+function buildInPlaceScript(tmpPath, destPath, marker) {
+  const tmp = escapeSh(tmpPath);
+  const dest = escapeSh(destPath);
+  const mark = escapeSh(marker);
+  return [
+    'inode=$(stat -c %i -- ' + dest + ' 2>/dev/null || stat -f %i -- ' + dest + ' 2>/dev/null || true)',
+    'if command -v dd >/dev/null 2>&1; then',
+    '  dd if=' + tmp + ' of=' + dest,
+    'else',
+    '  cat ' + tmp + ' > ' + dest,
+    'fi',
+    'status=$?',
+    'if [ "$status" -ne 0 ]; then exit "$status"; fi',
+    'if [ -n "$inode" ]; then',
+    '  now=$(stat -c %i -- ' + dest + ' 2>/dev/null || stat -f %i -- ' + dest + ' 2>/dev/null || true)',
+    '  if [ -n "$now" ] && [ "$now" != "$inode" ]; then',
+    '    echo "The file would have been replaced instead of updated in place." >&2',
+    '    exit 1',
+    '  fi',
+    'fi',
+    'printf \'%s\\n\' ' + mark,
+    'exit 0',
+  ].join('\n');
+}
+
+function suCommand(username, script, forceShell) {
+  const user = escapeSh(username);
+  const body = escapeSh(script);
+  // Username comes before -c so both util-linux and BSD su pass -c to the
+  // shell. This is the same authentication as `su -`: the target account's
+  // password is read from the terminal, not from sudo.
+  if (forceShell) return `su -s /bin/sh ${user} -c ${body}`;
+  return `su ${user} -c ${body}`;
+}
+
+function suRejectedInvocation(result) {
+  if (!result || result.promptCount > 0 || isSuAuthFailure(result.output)) return false;
+  return /invalid option|unknown option|unrecognized option|illegal option|unrecognized flag/i.test(result.output || '');
+}
+
+async function runSuScript(username, password, script) {
+  let result = await runPty(suCommand(username, script, true), password);
+  if (suRejectedInvocation(result)) {
+    result = await runPty(suCommand(username, script, false), password);
+  }
+  return result;
+}
+
 ipcMain.handle('ssh:readfile', (_event, { path: filePath }) => {
   return new Promise((resolve) => {
     if (!sftpSession) {
@@ -653,10 +1072,102 @@ ipcMain.handle('ssh:readfile', (_event, { path: filePath }) => {
           return;
         }
 
-        resolve({ success: true, content: data.toString('utf8'), size: stats.size });
+        resolve({
+          success: true,
+          content: data.toString('utf8'),
+          size: stats.size,
+          mtime: typeof stats.mtime === 'number' ? stats.mtime : null,
+          utf8: isValidUtf8(data),
+        });
       });
     });
   });
+});
+
+// ── SSH: Write file contents (regular SFTP files only) ───────────────────────
+ipcMain.handle('ssh:writefile', async (_event, payload) => {
+  const sftp = sftpSession;
+  if (!sftp) {
+    return { success: false, error: 'Saving is unavailable because the connection was lost.' };
+  }
+
+  try {
+    const prepared = await prepareRemoteWrite(sftp, payload);
+    if (prepared.error) return prepared.error;
+
+    await writeRemoteFile(sftp, prepared.filePath, prepared.buffer, prepared.previousSize);
+    return await savedFileResult(sftp, prepared.filePath, prepared.buffer.length);
+  } catch (err) {
+    const failure = saveFailure(err);
+    if (!failure.needsElevation || !sftpSession) return failure;
+    const extra = await describeElevation(payload && payload.path);
+    return { ...failure, ...extra, needsElevation: true };
+  }
+});
+
+// Permission was denied for the SSH account. Stage the new text, then su to
+// the account that can write and overwrite the existing file in place.
+ipcMain.handle('ssh:writefile-as', async (_event, payload) => {
+  const sftp = sftpSession;
+  if (!sftp || !sshClient) {
+    return { success: false, error: 'Saving is unavailable because the connection was lost.' };
+  }
+  const username = payload && payload.username;
+  const password = payload && payload.password;
+  if (!isSafeAccountName(username)) {
+    return { success: false, error: 'Enter the name of an account that can write this file.' };
+  }
+  if (typeof password !== 'string' || !password) {
+    return { success: false, error: `A password for ${username} is required.` };
+  }
+  if (password.length > 1024 || /[\0\r\n]/.test(password)) {
+    return { success: false, error: `The password for ${username} cannot be used.` };
+  }
+
+  let tmpPath = null;
+  try {
+    const prepared = await prepareRemoteWrite(sftp, payload);
+    if (prepared.error) return prepared.error;
+
+    tmpPath = `/tmp/.ssh-explorer-save-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+    await writeTempFile(sftp, tmpPath, prepared.buffer);
+    // Root can read a mode-600 staged file. Any other account needs it readable.
+    // The staged file is removed as soon as the write finishes.
+    if (username !== 'root') {
+      await runExec(`chmod 644 ${escapeSh(tmpPath)}`, undefined, { timeoutMs: 8000 });
+    }
+
+    const marker = `BROWSME_SAVE_OK_${crypto.randomBytes(6).toString('hex')}`;
+    const script = buildInPlaceScript(tmpPath, prepared.filePath, marker);
+    const result = await runSuScript(username, password, script);
+    if (!sftpSession || !sshClient) {
+      return { success: false, error: 'Saving is unavailable because the connection was lost.' };
+    }
+
+    const raw = result.output || '';
+    const saved = raw.includes(marker);
+    const wrongPassword = !saved && (result.promptCount > 1 || isSuAuthFailure(raw));
+    if (saved) {
+      return await savedFileResult(sftp, prepared.filePath, prepared.buffer.length);
+    }
+    if (wrongPassword) {
+      return { success: false, wrongPassword: true, error: `Incorrect password for ${username}.` };
+    }
+    const shown = redactSecret(raw, password);
+    return {
+      success: false,
+      wrongPassword: false,
+      error: usefulTerminalError(shown, marker),
+    };
+  } catch (err) {
+    const failure = saveFailure(err);
+    if (failure.needsElevation) {
+      return { success: false, error: `${username} could not write this file. It was not changed.` };
+    }
+    return failure;
+  } finally {
+    if (tmpPath) await unlinkRemote(sftpSession, tmpPath);
+  }
 });
 
 // ── SSH: Home directory ───────────────────────────────────────────────────────

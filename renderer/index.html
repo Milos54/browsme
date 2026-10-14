@@ -237,7 +237,7 @@
     <div class="confirm-modal">
       <div class="confirm-icon">🔐</div>
       <div class="confirm-title">Permission Denied</div>
-      <div class="confirm-msg">Deleting "<span id="sudo-item-name"></span>" requires elevated privileges.</div>
+      <div class="confirm-msg"><span id="sudo-verb">Deleting</span> "<span id="sudo-item-name"></span>" requires elevated privileges.</div>
       <div class="field-group" style="margin-top:16px">
         <label for="sudo-pass-input">sudo password</label>
         <input id="sudo-pass-input" type="password" placeholder="••••••••" />
@@ -248,6 +248,31 @@
         <button id="sudo-ok"     class="confirm-btn-delete">
           <span id="sudo-ok-text">Delete with sudo</span>
           <span id="sudo-spinner" class="spinner hidden"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Save as another account (su, not sudo) ───────────────────────────── -->
+  <div id="elevate-backdrop" class="confirm-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="elevate-title">
+    <div class="confirm-modal" role="document">
+      <div class="confirm-icon" aria-hidden="true">🔐</div>
+      <div id="elevate-title" class="confirm-title">Permission denied</div>
+      <div id="elevate-msg" class="confirm-msg"></div>
+      <div class="field-group">
+        <label for="elevate-user-input">Account that can write this file</label>
+        <input id="elevate-user-input" name="elevate-account" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" />
+      </div>
+      <div class="field-group">
+        <label id="elevate-pass-label" for="elevate-pass-input">Password for this account</label>
+        <input id="elevate-pass-input" name="elevate-secret" type="password" autocomplete="new-password" />
+      </div>
+      <div id="elevate-error" class="error-msg hidden"></div>
+      <div class="confirm-btns">
+        <button type="button" id="elevate-cancel" class="confirm-btn-cancel">Cancel</button>
+        <button type="button" id="elevate-ok" class="confirm-btn-save">
+          <span id="elevate-ok-text">Save</span>
+          <span id="elevate-spinner" class="spinner hidden"></span>
         </button>
       </div>
     </div>
@@ -292,6 +317,57 @@
     </div>
   </div>
 
+  <!-- ── Remote text editor (SFTP only; Docker files stay on the preview) ── -->
+  <div id="editor-backdrop" class="editor-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="editor-filename">
+    <div class="editor-modal">
+      <div class="editor-header">
+        <div class="editor-title-wrap">
+          <span id="editor-icon" class="preview-file-icon" aria-hidden="true"></span>
+          <div class="editor-heading">
+            <div class="editor-heading-row">
+              <span id="editor-filename" class="preview-filename"></span>
+              <span id="editor-dirty" class="editor-dirty hidden">Unsaved changes</span>
+            </div>
+            <span id="editor-path" class="editor-path"></span>
+          </div>
+        </div>
+        <div class="editor-actions">
+          <span id="editor-status" class="editor-status" role="status" aria-live="polite"></span>
+          <button type="button" id="editor-save" class="editor-save-btn" aria-keyshortcuts="Control+S Meta+S">Save</button>
+          <button type="button" id="editor-exit" class="editor-exit-btn">Exit</button>
+        </div>
+      </div>
+      <div id="editor-loading" class="preview-loading hidden">
+        <div class="loading-spinner"></div>
+        <span>Loading file…</span>
+      </div>
+      <div id="editor-load-error" class="preview-error hidden"></div>
+      <textarea id="editor-text" class="editor-text hidden" spellcheck="false" wrap="off" autocomplete="off" autocapitalize="off" aria-label="Remote file contents"></textarea>
+    </div>
+  </div>
+
+  <div id="editor-confirm-backdrop" class="confirm-backdrop editor-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="editor-confirm-title">
+    <div class="confirm-modal" role="document">
+      <div id="editor-confirm-title" class="confirm-title">You have unsaved changes</div>
+      <div id="editor-confirm-error" class="error-msg hidden"></div>
+      <div class="confirm-btns">
+        <button type="button" id="editor-save-exit" class="confirm-btn-save">Save and exit</button>
+        <button type="button" id="editor-discard-exit" class="confirm-btn-cancel">exit without saving</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editor-conflict-backdrop" class="confirm-backdrop editor-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="editor-conflict-title">
+    <div class="confirm-modal" role="document">
+      <div id="editor-conflict-title" class="confirm-title">The remote file has changed</div>
+      <div id="editor-conflict-msg" class="confirm-msg">The remote file has changed since you opened or last saved it. It was not overwritten. Your edits are still in the editor.</div>
+      <div class="confirm-btns">
+        <button type="button" id="editor-conflict-cancel" class="confirm-btn-cancel">Cancel</button>
+        <button type="button" id="editor-conflict-overwrite" class="confirm-btn-save">Overwrite</button>
+      </div>
+    </div>
+  </div>
+
   <!-- ── File Preview Modal ───────────────────────────────────────────────── -->
   <div id="preview-backdrop" class="preview-backdrop hidden">
     <div id="preview-modal" class="preview-modal">
@@ -314,6 +390,7 @@
     </div>
   </div>
 
+  <script src="editor-state.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -905,6 +905,212 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   margin: 0;
 }
 
+/* ── Remote text editor ─────────────────────────────────────────────────────── */
+.editor-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 220;
+  padding: 24px;
+  backdrop-filter: blur(2px);
+}
+
+.editor-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 1100px;
+  height: calc(100vh - 72px);
+  max-height: calc(100vh - 72px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+.editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--surface);
+}
+
+.editor-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+
+.editor-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.editor-heading-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.editor-path {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+}
+
+.editor-dirty {
+  font-size: 11px;
+  font-weight: 600;
+  color: #f0b429;
+  background: rgba(240, 180, 41, 0.12);
+  border: 1px solid rgba(240, 180, 41, 0.35);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.editor-status {
+  font-size: 12px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-status-ok { color: #3fb950; }
+.editor-status-error {
+  color: var(--danger);
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  max-width: 360px;
+}
+.editor-status-progress { color: var(--text-dim); }
+
+.editor-save-btn,
+.editor-exit-btn {
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.editor-save-btn {
+  background: var(--accent);
+  border: none;
+  color: #0d1117;
+}
+.editor-save-btn:hover { background: var(--accent-h); }
+.editor-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.editor-exit-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-weight: 600;
+}
+.editor-exit-btn:hover { background: var(--border); }
+.editor-exit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.editor-save-btn:focus-visible,
+.editor-exit-btn:focus-visible,
+#editor-save-exit:focus-visible,
+#editor-discard-exit:focus-visible,
+#editor-conflict-cancel:focus-visible,
+#editor-conflict-overwrite:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.editor-modal .preview-loading,
+.editor-modal .preview-error {
+  flex: 1;
+}
+
+.editor-text {
+  display: block;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 16px 18px;
+  border: none;
+  outline: none;
+  resize: none;
+  background: var(--bg);
+  color: var(--text);
+  caret-color: var(--text);
+  font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'SF Mono', monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.editor-text::selection {
+  background: rgba(88, 166, 255, 0.35);
+}
+
+.editor-text::-webkit-scrollbar { width: 8px; height: 8px; }
+.editor-text::-webkit-scrollbar-track { background: transparent; }
+.editor-text::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+.editor-text::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+.editor-dialog { z-index: 280; }
+#editor-conflict-backdrop { z-index: 300; }
+#sudo-backdrop { z-index: 320; }
+#elevate-backdrop { z-index: 330; }
+
+#elevate-backdrop .confirm-modal { max-width: 460px; }
+#elevate-backdrop .confirm-msg { text-align: left; margin-bottom: 16px; }
+#elevate-backdrop .field-group { text-align: left; }
+#elevate-backdrop .confirm-btns { margin-top: 4px; }
+
+#editor-confirm-backdrop .confirm-modal,
+#editor-conflict-backdrop .confirm-modal {
+  max-width: 460px;
+}
+
+#editor-confirm-backdrop .confirm-btns,
+#editor-conflict-backdrop .confirm-btns {
+  flex-wrap: wrap;
+}
+
+#editor-confirm-error {
+  text-align: left;
+  margin-top: 8px;
+}
+
 /* ── Docker dropdown ────────────────────────────────────────────────────────── */
 .docker-wrap {
   position: relative;
