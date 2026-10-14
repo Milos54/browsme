@@ -1158,7 +1158,7 @@ async function runElevatedSave() {
   $('elevate-pass-input').focus();
 }
 
-function promptElevatedSave(exitAfter, force, caret, info) {
+function promptElevatedSave(force, info) {
   const prompt = window.editorState.elevationPrompt(info || {});
   openElevateModal(prompt, async (username, password) => {
     const api = window.editorState;
@@ -1212,9 +1212,7 @@ function promptElevatedSave(exitAfter, force, caret, info) {
     refreshRemoteEditorDirty();
     dismissUnsavedDialog();
     dismissRemoteConflict();
-    setRemoteEditorStatus('ok', 'Saved');
-    if (exitAfter) closeRemoteEditor();
-    else restoreCaret(area, caret);
+    closeRemoteEditor();
     return result;
   });
 }
@@ -1280,7 +1278,7 @@ async function saveRemoteEditor(opts) {
     if (result && result.needsElevation) {
       const prompt = window.editorState.elevationPrompt(result);
       setRemoteEditorStatus('error', `Permission denied. Enter the password for ${prompt.username} to save.`);
-      promptElevatedSave(exitAfter, force, caret, result);
+      promptElevatedSave(force, result);
       return;
     }
 
@@ -1306,12 +1304,8 @@ async function saveRemoteEditor(opts) {
     refreshRemoteEditorDirty();
     dismissUnsavedDialog();
     dismissRemoteConflict();
-    setRemoteEditorStatus('ok', 'Saved');
-    if (exitAfter) {
-      closeRemoteEditor();
-      return;
-    }
-    restoreCaret(area, caret);
+    closeRemoteEditor();
+    loadDirectory(currentPath, false);
   } catch (err) {
     if (!remoteEditor.open || gen !== remoteEditor.gen) return;
     const msg = (err && err.message) || 'Save failed.';
