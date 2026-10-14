@@ -2,7 +2,7 @@
 let currentPath   = '/';
 let navHistory    = [];
 let historyIndex  = -1;
-let viewMode      = 'grid';   // 'grid' | 'list'
+let viewMode      = 'list';   // 'grid' | 'list'
 let currentFiles  = [];
 let connectionInfo = null;
 let isLoading     = false;
