@@ -970,6 +970,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
 .docker-loading, .docker-empty, .docker-error {
   padding: 20px 14px;
   font-size: 13px;
+  line-height: 1.45;
   color: var(--text-dim);
   text-align: center;
 }

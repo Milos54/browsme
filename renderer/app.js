@@ -305,15 +305,20 @@ async function loadDirectory(dirPath, pushHistory = true) {
   hideFileError();
   $('empty-msg').classList.add('hidden');
 
-  const result = dockerMode
-    ? await window.api.dockerReaddir(dockerMode.id, dirPath)
-    : await window.api.readdir(dirPath);
+  let result;
+  try {
+    result = dockerMode
+      ? await window.api.dockerReaddir(dockerMode.id, dirPath)
+      : await window.api.readdir(dirPath);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Failed to read directory.' };
+  }
 
   setLoading(false);
   isLoading = false;
 
-  if (!result.success) {
-    showFileError(result.error || 'Failed to read directory.');
+  if (!result || !result.success) {
+    showFileError(dockerSafeError(result, 'Failed to read directory.'));
     return;
   }
 
@@ -565,14 +570,19 @@ async function openPreview(filePath, fileName, fileSize) {
   content.classList.add('hidden');
   backdrop.classList.remove('hidden');
 
-  const result = dockerMode
-    ? await window.api.dockerReadfile(dockerMode.id, filePath)
-    : await window.api.readfile(filePath);
+  let result;
+  try {
+    result = dockerMode
+      ? await window.api.dockerReadfile(dockerMode.id, filePath)
+      : await window.api.readfile(filePath);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Could not read file.' };
+  }
 
   loading.classList.add('hidden');
 
-  if (!result.success) {
-    errEl.textContent = result.error || 'Could not read file.';
+  if (!result || !result.success) {
+    errEl.textContent = dockerSafeError(result, 'Could not read file.');
     errEl.classList.remove('hidden');
     return;
   }
@@ -654,16 +664,21 @@ async function runRename() {
 
   const dir     = currentPath === '/' ? '' : currentPath;
   const newPath = `${dir}/${newName}`;
-  const result  = dockerMode
-    ? await window.api.dockerRename(dockerMode.id, ctxTarget.fullPath, newPath)
-    : await window.api.rename(ctxTarget.fullPath, newPath);
+  let result;
+  try {
+    result = dockerMode
+      ? await window.api.dockerRename(dockerMode.id, ctxTarget.fullPath, newPath)
+      : await window.api.rename(ctxTarget.fullPath, newPath);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Rename failed.' };
+  }
 
   $('rename-ok').disabled = false;
   $('rename-ok-text').textContent = 'Rename';
   $('rename-spinner').classList.add('hidden');
 
-  if (!result.success) {
-    $('rename-error').textContent = result.error || 'Rename failed.';
+  if (!result || !result.success) {
+    $('rename-error').textContent = dockerSafeError(result, 'Rename failed.');
     $('rename-error').classList.remove('hidden');
     return;
   }
@@ -673,9 +688,25 @@ async function runRename() {
 }
 
 // ── Docker mode ────────────────────────────────────────────────────────────────
+const DOCKER_MISSING_MSG = 'No docker containers found or maybe no docker installed';
+
 let dockerMode      = null;   // null | { id, name, image }
 let preDockerPath   = '/';    // SFTP path to return to after exiting container
 let dockerDropdownOpen = false;
+let dockerFetchGen = 0;
+
+function isDockerUnavailable(result) {
+  if (!result) return false;
+  if (result.unavailable) return true;
+  const text = typeof result === 'string' ? result : `${result.error || ''}\n${result.stderr || ''}`;
+  return /\bdocker(?:\.exe)?:\s*(?:command\s+)?not found\b/i.test(text);
+}
+
+function dockerSafeError(result, fallback) {
+  if (isDockerUnavailable(result)) return DOCKER_MISSING_MSG;
+  if (result && result.error) return result.error;
+  return fallback;
+}
 
 async function toggleDockerDropdown() {
   if (dockerDropdownOpen) { closeDockerDropdown(); return; }
@@ -695,12 +726,26 @@ function closeDockerDropdown() {
 }
 
 async function fetchContainers() {
-  const result = await window.api.dockerContainers();
-  if (!result.success) {
-    $('docker-list').innerHTML = `<div class="docker-error">${escHtml(result.error)}</div>`;
+  const gen = ++dockerFetchGen;
+  let result;
+  try {
+    result = await window.api.dockerContainers();
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Failed to list containers' };
+  }
+
+  // Dropdown was closed or a newer fetch started — don't overwrite it.
+  if (!dockerDropdownOpen || gen !== dockerFetchGen) return;
+
+  if (!result || isDockerUnavailable(result)) {
+    $('docker-list').innerHTML = `<div class="docker-empty">${escHtml(DOCKER_MISSING_MSG)}</div>`;
     return;
   }
-  if (result.containers.length === 0) {
+  if (!result.success) {
+    $('docker-list').innerHTML = `<div class="docker-error">${escHtml(result.error || 'Failed to list containers')}</div>`;
+    return;
+  }
+  if (!Array.isArray(result.containers) || result.containers.length === 0) {
     $('docker-list').innerHTML = '<div class="docker-empty">No containers found</div>';
     return;
   }
@@ -866,16 +911,21 @@ async function runDelete() {
   $('confirm-ok-text').textContent = 'Deleting…';
   $('confirm-spinner').classList.remove('hidden');
 
-  const result = dockerMode
-    ? await window.api.dockerDelete(dockerMode.id, ctxTarget.fullPath)
-    : await window.api.delete(ctxTarget.fullPath);
+  let result;
+  try {
+    result = dockerMode
+      ? await window.api.dockerDelete(dockerMode.id, ctxTarget.fullPath)
+      : await window.api.delete(ctxTarget.fullPath);
+  } catch (err) {
+    result = { success: false, error: (err && err.message) || 'Delete failed.' };
+  }
 
   $('confirm-ok').disabled         = false;
   $('confirm-ok-text').textContent = 'Delete';
   $('confirm-spinner').classList.add('hidden');
   closeConfirm();
 
-  if (result.success) {
+  if (result && result.success) {
     loadDirectory(currentPath, false);
     return;
   }
@@ -890,7 +940,7 @@ async function runDelete() {
   }
 
   // Generic error — show briefly in status bar
-  $('status-items').textContent = `⚠ ${result.error}`;
+  $('status-items').textContent = `⚠ ${dockerSafeError(result, 'Delete failed.')}`;
   setTimeout(() => {
     $('status-items').textContent = `${currentFiles.length} items`;
   }, 4000);
@@ -1000,16 +1050,21 @@ async function handleUpload(files) {
     // In docker mode: upload to server /tmp then docker cp into container
     // In normal mode: upload directly via SFTP
     const remotePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
-    const result = dockerMode
-      ? await window.api.dockerUpload(localPath, dockerMode.id, currentPath)
-      : await window.api.upload(localPath, remotePath);
+    let result;
+    try {
+      result = dockerMode
+        ? await window.api.dockerUpload(localPath, dockerMode.id, currentPath)
+        : await window.api.upload(localPath, remotePath);
+    } catch (err) {
+      result = { success: false, error: (err && err.message) || 'Upload failed.' };
+    }
 
-    if (result.success) {
+    if (result && result.success) {
       setUploadStatus(job, 'done');
       job.el.querySelector('.up-bar').style.width = '100%';
       job.el.querySelector('.up-pct').textContent = '100%';
     } else {
-      setUploadStatus(job, 'error', result.error);
+      setUploadStatus(job, 'error', dockerSafeError(result, 'Upload failed.'));
     }
   }
 

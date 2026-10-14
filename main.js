@@ -409,121 +409,186 @@ function parseLsLa(output) {
   return files;
 }
 
+// Shown when the remote host has no docker binary. Kept identical in the renderer.
+const DOCKER_MISSING_MSG = 'No docker containers found or maybe no docker installed';
+
+function isDockerMissingOutput(text) {
+  return /\bdocker(?:\.exe)?:\s*(?:command\s+)?not found\b/i.test(String(text || ''));
+}
+
+function dockerMissingResult() {
+  return { success: false, unavailable: true, error: DOCKER_MISSING_MSG };
+}
+
+function dockerError(stderr, fallback) {
+  const raw = (stderr || '').trim();
+  if (isDockerMissingOutput(raw)) return dockerMissingResult();
+  return { success: false, error: raw || fallback };
+}
+
 // ── Docker: list containers ───────────────────────────────────────────────────
 ipcMain.handle('ssh:docker-containers', async () => {
-  const { code, stdout, stderr } = await runExec(
-    'docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"'
-  );
-  if (code !== 0) return { success: false, error: stderr.trim() || 'docker ps failed — is Docker installed?' };
+  try {
+    if (!sshClient) return { success: false, error: 'Not connected' };
 
-  const containers = stdout
-    .trim()
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((line) => {
-      const [id, name, image, ...statusParts] = line.split('\t');
-      const status = statusParts.join('\t');
-      return { id, name, image, status, running: /^up /i.test(status) };
-    });
+    const { code, stdout, stderr } = await runExec(
+      'docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}"'
+    );
+    const output = `${stderr}\n${stdout}`;
+    // 127 is the shell's "command not found" status. Don't surface the raw bash line.
+    if (isDockerMissingOutput(output) || code === 127) {
+      return { success: true, containers: [], unavailable: true };
+    }
+    if (code !== 0) return dockerError(stderr, 'docker ps failed — is Docker installed?');
 
-  return { success: true, containers };
+    const containers = stdout
+      .trim()
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((line) => {
+        const [id, name, image, ...statusParts] = line.split('\t');
+        const status = statusParts.join('\t');
+        return { id, name, image, status, running: /^up /i.test(status) };
+      })
+      .filter((c) => c.id && c.name);
+
+    return { success: true, containers };
+  } catch (err) {
+    return { success: false, error: err.message || 'Failed to list containers' };
+  }
 });
 
 // ── Docker: read directory ────────────────────────────────────────────────────
 ipcMain.handle('ssh:docker-readdir', async (_event, { containerId, path: dirPath }) => {
-  // Use `ls -la` — available on every container (GNU, busybox/Alpine, etc.)
-  // Pass through `sh -c` so special characters in path are handled safely.
-  const cmd = `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`ls -la ${escapeSh(dirPath)}`)}`;
-  let { code, stdout, stderr } = await runExec(cmd);
+  try {
+    if (!containerId) return { success: false, error: 'No container selected' };
 
-  // Fallback: some containers have sh elsewhere or ls not at /bin/ls
-  if (code !== 0 || !stdout.trim()) {
-    const fallback = await runExec(`docker exec ${escapeSh(containerId)} ls -la ${escapeSh(dirPath)}`);
-    if (fallback.stdout.trim()) { stdout = fallback.stdout; code = fallback.code; stderr = fallback.stderr; }
+    // Use `ls -la` — available on every container (GNU, busybox/Alpine, etc.)
+    // Pass through `sh -c` so special characters in path are handled safely.
+    const cmd = `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`ls -la ${escapeSh(dirPath)}`)}`;
+    let { code, stdout, stderr } = await runExec(cmd);
+    if (isDockerMissingOutput(`${stderr}\n${stdout}`)) return dockerMissingResult();
+
+    // Fallback: some containers have sh elsewhere or ls not at /bin/ls
+    if (code !== 0 || !stdout.trim()) {
+      const fallback = await runExec(`docker exec ${escapeSh(containerId)} ls -la ${escapeSh(dirPath)}`);
+      if (isDockerMissingOutput(`${fallback.stderr}\n${fallback.stdout}`)) return dockerMissingResult();
+      if (fallback.stdout.trim()) { stdout = fallback.stdout; code = fallback.code; stderr = fallback.stderr; }
+    }
+
+    if (!stdout.trim()) {
+      return dockerError(stderr, 'Directory appears empty or command failed inside container.');
+    }
+
+    return { success: true, files: parseLsLa(stdout) };
+  } catch (err) {
+    return { success: false, error: err.message || 'Failed to read directory' };
   }
-
-  if (!stdout.trim()) {
-    return { success: false, error: (stderr || '').trim() || 'Directory appears empty or command failed inside container.' };
-  }
-
-  return { success: true, files: parseLsLa(stdout) };
 });
 
 // ── Docker: read file ─────────────────────────────────────────────────────────
 ipcMain.handle('ssh:docker-readfile', async (_event, { containerId, path: filePath }) => {
-  // Check size via wc -c (universally available, no need for stat)
-  const { stdout: sizeOut } = await runExec(
-    `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`wc -c < ${escapeSh(filePath)}`)}`
-  );
-  const size = parseInt(sizeOut.trim()) || 0;
-  if (size > 1024 * 1024) {
-    return { success: false, error: `File is too large to preview (${(size / 1024 / 1024).toFixed(1)} MB). Limit is 1 MB.` };
+  try {
+    if (!containerId) return { success: false, error: 'No container selected' };
+
+    // Check size via wc -c (universally available, no need for stat)
+    const sizeResult = await runExec(
+      `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`wc -c < ${escapeSh(filePath)}`)}`
+    );
+    if (isDockerMissingOutput(`${sizeResult.stderr}\n${sizeResult.stdout}`)) return dockerMissingResult();
+
+    const size = parseInt(sizeResult.stdout.trim()) || 0;
+    if (size > 1024 * 1024) {
+      return { success: false, error: `File is too large to preview (${(size / 1024 / 1024).toFixed(1)} MB). Limit is 1 MB.` };
+    }
+
+    const { code, stdout, stderr } = await runExec(
+      `docker exec ${escapeSh(containerId)} cat ${escapeSh(filePath)}`
+    );
+    if (isDockerMissingOutput(`${stderr}\n${stdout}`)) return dockerMissingResult();
+    if (code !== 0) return dockerError(stderr, 'Cannot read file');
+
+    // Binary check
+    if (stdout.includes('\x00')) return { success: false, error: 'Binary file — cannot preview.' };
+
+    return { success: true, content: stdout, size };
+  } catch (err) {
+    return { success: false, error: err.message || 'Cannot read file' };
   }
-
-  const { code, stdout, stderr } = await runExec(
-    `docker exec ${escapeSh(containerId)} cat ${escapeSh(filePath)}`
-  );
-  if (code !== 0) return { success: false, error: stderr.trim() || 'Cannot read file' };
-
-  // Binary check
-  if (stdout.includes('\x00')) return { success: false, error: 'Binary file — cannot preview.' };
-
-  return { success: true, content: stdout, size };
 });
 
 // ── Docker: delete ────────────────────────────────────────────────────────────
 ipcMain.handle('ssh:docker-delete', async (_event, { containerId, path: targetPath }) => {
-  const { code, stderr } = await runExec(
-    `docker exec ${escapeSh(containerId)} rm -rf ${escapeSh(targetPath)}`
-  );
-  if (code === 0) return { success: true };
-  return { success: false, error: stderr.trim() || `Exit code ${code}` };
+  try {
+    if (!containerId) return { success: false, error: 'No container selected' };
+    const { code, stdout, stderr } = await runExec(
+      `docker exec ${escapeSh(containerId)} rm -rf ${escapeSh(targetPath)}`
+    );
+    if (isDockerMissingOutput(`${stderr}\n${stdout}`)) return dockerMissingResult();
+    if (code === 0) return { success: true };
+    return dockerError(stderr, `Exit code ${code}`);
+  } catch (err) {
+    return { success: false, error: err.message || 'Delete failed' };
+  }
 });
 
 // ── Docker: rename ────────────────────────────────────────────────────────────
 ipcMain.handle('ssh:docker-rename', async (_event, { containerId, oldPath, newPath }) => {
-  const { code, stderr } = await runExec(
-    `docker exec ${escapeSh(containerId)} mv ${escapeSh(oldPath)} ${escapeSh(newPath)}`
-  );
-  if (code === 0) return { success: true };
-  return { success: false, error: stderr.trim() || `Exit code ${code}` };
+  try {
+    if (!containerId) return { success: false, error: 'No container selected' };
+    const { code, stdout, stderr } = await runExec(
+      `docker exec ${escapeSh(containerId)} mv ${escapeSh(oldPath)} ${escapeSh(newPath)}`
+    );
+    if (isDockerMissingOutput(`${stderr}\n${stdout}`)) return dockerMissingResult();
+    if (code === 0) return { success: true };
+    return dockerError(stderr, `Exit code ${code}`);
+  } catch (err) {
+    return { success: false, error: err.message || 'Rename failed' };
+  }
 });
 
 // ── Docker: upload file (desktop → server temp → docker cp → container) ───────
 ipcMain.handle('ssh:docker-upload', (_event, { localPath, containerId, containerDir }) => {
   return new Promise(async (resolve) => {
-    if (!sftpSession) { resolve({ success: false, error: 'Not connected' }); return; }
-
-    const filename = require('path').basename(localPath);
-    const tmpPath  = `/tmp/.ssh-explorer-${Date.now()}-${filename}`;
-
-    // Step 1 — upload local file to server /tmp via SFTP (with progress)
     try {
-      await new Promise((res, rej) => {
-        sftpSession.fastPut(localPath, tmpPath, {
-          step: (transferred, _chunk, total) => {
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send('upload:progress', { localPath, transferred, total });
-            }
-          },
-        }, (err) => err ? rej(err) : res());
-      });
+      if (!sftpSession) { resolve({ success: false, error: 'Not connected' }); return; }
+      if (!containerId) { resolve({ success: false, error: 'No container selected' }); return; }
+
+      const filename = require('path').basename(localPath);
+      const tmpPath  = `/tmp/.ssh-explorer-${Date.now()}-${filename}`;
+
+      // Step 1 — upload local file to server /tmp via SFTP (with progress)
+      try {
+        await new Promise((res, rej) => {
+          sftpSession.fastPut(localPath, tmpPath, {
+            step: (transferred, _chunk, total) => {
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('upload:progress', { localPath, transferred, total });
+              }
+            },
+          }, (err) => err ? rej(err) : res());
+        });
+      } catch (err) {
+        resolve({ success: false, error: `Upload to server failed: ${err.message}` });
+        return;
+      }
+
+      // Step 2 — docker cp from server temp to container
+      const dest = `${containerId}:${containerDir.replace(/\/$/, '')}/${filename}`;
+      const { code, stdout, stderr } = await runExec(`docker cp ${escapeSh(tmpPath)} ${escapeSh(dest)}`);
+
+      // Step 3 — clean up temp file regardless of outcome
+      await runExec(`rm -f ${escapeSh(tmpPath)}`);
+
+      if (isDockerMissingOutput(`${stderr}\n${stdout}`)) {
+        resolve(dockerMissingResult());
+      } else if (code !== 0) {
+        resolve(dockerError(stderr, 'docker cp failed'));
+      } else {
+        resolve({ success: true });
+      }
     } catch (err) {
-      resolve({ success: false, error: `Upload to server failed: ${err.message}` });
-      return;
-    }
-
-    // Step 2 — docker cp from server temp to container
-    const dest = `${containerId}:${containerDir.replace(/\/$/, '')}/${filename}`;
-    const { code, stderr } = await runExec(`docker cp ${escapeSh(tmpPath)} ${escapeSh(dest)}`);
-
-    // Step 3 — clean up temp file regardless of outcome
-    await runExec(`rm -f ${escapeSh(tmpPath)}`);
-
-    if (code !== 0) {
-      resolve({ success: false, error: stderr.trim() || 'docker cp failed' });
-    } else {
-      resolve({ success: true });
+      resolve({ success: false, error: err.message || 'Upload failed' });
     }
   });
 });
