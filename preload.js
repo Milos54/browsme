@@ -46,4 +46,9 @@ contextBridge.exposeInMainWorld('api', {
   onUploadProgress: (cb) => ipcRenderer.on('upload:progress', (_e, data) => cb(data)),
   getFilePath: (file) => webUtils.getPathForFile(file),
   homedir:    ()      => ipcRenderer.invoke('ssh:homedir'),
+
+  // Non-secret SSH form history in the app user-data directory.
+  loadFormMemory: () => ipcRenderer.invoke('form-memory:load'),
+  saveFormMemory: (data) => ipcRenderer.invoke('form-memory:save', data),
+  flushFormMemory: (data) => ipcRenderer.sendSync('form-memory:flush', data),
 });

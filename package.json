@@ -26,6 +26,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "form-memory.js",
       "renderer/**",
       "package.json",
       "node_modules/**"

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
+const { loadFormMemory, saveFormMemory } = require('./form-memory');
 const { Client } = require('ssh2');
 const {
   assessRemoteChange,
@@ -65,6 +66,21 @@ ipcMain.on('window:close', () => {
   mainWindow.close();
 });
 ipcMain.handle('window:is-maximized', () => mainWindow.isMaximized());
+
+// SSH form history. Passwords are stripped again here so they cannot be stored.
+ipcMain.handle('form-memory:load', () => loadFormMemory(app.getPath('userData')));
+ipcMain.handle('form-memory:save', (_event, data) => {
+  saveFormMemory(app.getPath('userData'), data);
+  return { success: true };
+});
+ipcMain.on('form-memory:flush', (event, data) => {
+  try {
+    saveFormMemory(app.getPath('userData'), data);
+    event.returnValue = { success: true };
+  } catch (err) {
+    event.returnValue = { success: false, error: err.message };
+  }
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function cleanupConnections() {

@@ -7,6 +7,13 @@ let currentFiles  = [];
 let connectionInfo = null;
 let isLoading     = false;
 
+// Main-form history and per-source-server hop history. Passwords are never stored.
+// Kept in memory for the session and mirrored to the app user-data file.
+let lastDirectConnect = null;
+const lastHopFromServer = new Map();
+let formMemoryReady = false;
+let formMemorySaveTimer = null;
+
 // Windows Explorer type-ahead: letters accumulate for a short window.
 // Repeating one letter walks every name that starts with it, then wraps.
 const TYPE_AHEAD_MS = 1000;
@@ -16,10 +23,14 @@ let typeAheadAt = 0;
 const $ = (id) => document.getElementById(id);
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   bindWindowControls();
-  bindConnectForm();
   bindExplorerControls();
+  await loadPersistedFormMemory();
+  applyLastDirectConnect();
+  document.documentElement.dataset.formMemory = 'ready';
+  bindConnectForm();
+  window.addEventListener('beforeunload', flushFormMemoryFromForm);
 });
 
 function bindWindowControls() {
@@ -39,6 +50,15 @@ function bindConnectForm() {
     const on = e.target.checked;
     $('jump-section').classList.toggle('hidden', !on);
     $('password-optional').classList.toggle('hidden', !on);
+    captureDirectConnectFromForm();
+  });
+
+  // Latest non-password main-form values replace the saved ones.
+  [
+    'input-host', 'input-username', 'input-port',
+    'jump-host', 'jump-username', 'jump-port',
+  ].forEach((id) => {
+    $(id).addEventListener('input', captureDirectConnectFromForm);
   });
 
   // Allow Enter in any field to submit
@@ -232,6 +252,7 @@ async function handleConnect() {
   }
 
   connectionInfo = { host, username, port, jump };
+  rememberDirectConnect({ host, username, port, jump });
   const label = jump
     ? `${username}@${host} via ${jump.username}@${jump.host}`
     : `${username}@${host}`;
@@ -258,18 +279,170 @@ async function handleDisconnect() {
   $('file-container').innerHTML   = '';
   $('status-items').textContent   = '';
   setConnecting(false);
+  applyLastDirectConnect();
   showScreen('connect');
+}
+
+function serverMemoryKey(info) {
+  if (!info || !info.host || !info.username) return '';
+  return `${info.username}@${info.host}:${info.port || 22}`;
+}
+
+function rememberDirectConnect({ host, username, port, jump }) {
+  lastDirectConnect = {
+    host,
+    username,
+    port: port || 22,
+    jump: jump
+      ? { host: jump.host, username: jump.username, port: jump.port || 22 }
+      : null,
+  };
+  persistFormMemoryNow();
+}
+
+function captureDirectConnectFromForm() {
+  if (!formMemoryReady) return;
+  const useJump = $('chk-jump').checked;
+  lastDirectConnect = {
+    host: $('input-host').value.trim(),
+    username: $('input-username').value.trim(),
+    port: parseInt($('input-port').value, 10) || 22,
+    jump: useJump
+      ? {
+          host: $('jump-host').value.trim(),
+          username: $('jump-username').value.trim(),
+          port: parseInt($('jump-port').value, 10) || 22,
+        }
+      : null,
+  };
+  schedulePersistFormMemory();
+}
+
+function formMemoryPayload() {
+  const hops = {};
+  for (const [key, value] of lastHopFromServer) {
+    if (!value) continue;
+    hops[key] = {
+      host: value.host,
+      username: value.username,
+      port: value.port || 22,
+    };
+  }
+
+  if (!lastDirectConnect) return { direct: null, hops };
+
+  return {
+    direct: {
+      host: lastDirectConnect.host,
+      username: lastDirectConnect.username,
+      port: lastDirectConnect.port || 22,
+      jump: lastDirectConnect.jump
+        ? {
+            host: lastDirectConnect.jump.host,
+            username: lastDirectConnect.jump.username,
+            port: lastDirectConnect.jump.port || 22,
+          }
+        : null,
+    },
+    hops,
+  };
+}
+
+async function loadPersistedFormMemory() {
+  let data = null;
+  try {
+    data = await window.api.loadFormMemory();
+  } catch {
+    data = null;
+  }
+
+  lastDirectConnect = data && data.direct ? data.direct : null;
+  lastHopFromServer.clear();
+  const hops = data && data.hops;
+  if (hops && typeof hops === 'object') {
+    for (const [key, value] of Object.entries(hops)) {
+      lastHopFromServer.set(key, value);
+    }
+  }
+  formMemoryReady = true;
+}
+
+function schedulePersistFormMemory() {
+  if (!formMemoryReady) return;
+  clearTimeout(formMemorySaveTimer);
+  formMemorySaveTimer = setTimeout(() => {
+    formMemorySaveTimer = null;
+    window.api.saveFormMemory(formMemoryPayload()).catch(() => {});
+  }, 150);
+}
+
+function persistFormMemoryNow() {
+  if (!formMemoryReady) return;
+  clearTimeout(formMemorySaveTimer);
+  formMemorySaveTimer = null;
+  try {
+    window.api.flushFormMemory(formMemoryPayload());
+  } catch {
+    // The in-session values still apply if the file cannot be written.
+  }
+}
+
+function flushFormMemoryFromForm() {
+  if (!formMemoryReady) return;
+  captureDirectConnectFromForm();
+  persistFormMemoryNow();
+}
+
+function setJumpFieldsVisible(on) {
+  $('chk-jump').checked = on;
+  $('jump-section').classList.toggle('hidden', !on);
+  $('password-optional').classList.toggle('hidden', !on);
+}
+
+function applyLastDirectConnect() {
+  $('input-password').value = '';
+  $('jump-password').value = '';
+
+  const saved = lastDirectConnect;
+  if (!saved) return;
+
+  $('input-host').value = saved.host;
+  $('input-username').value = saved.username;
+  $('input-port').value = String(saved.port || 22);
+
+  if (saved.jump) {
+    setJumpFieldsVisible(true);
+    $('jump-host').value = saved.jump.host;
+    $('jump-username').value = saved.jump.username;
+    $('jump-port').value = String(saved.jump.port || 22);
+  } else {
+    setJumpFieldsVisible(false);
+    $('jump-host').value = '';
+    $('jump-username').value = '';
+    $('jump-port').value = '22';
+  }
 }
 
 // ── Hop Modal ──────────────────────────────────────────────────────────────────
 function openHopModal() {
-  $('hop-input-host').value     = '';
-  $('hop-input-username').value = '';
+  const remembered = connectionInfo
+    ? lastHopFromServer.get(serverMemoryKey(connectionInfo))
+    : null;
+
   $('hop-input-password').value = '';
-  $('hop-input-port').value     = '22';
+  if (remembered) {
+    $('hop-input-host').value = remembered.host;
+    $('hop-input-username').value = remembered.username;
+    $('hop-input-port').value = String(remembered.port || 22);
+  } else {
+    $('hop-input-host').value = '';
+    $('hop-input-username').value = '';
+    $('hop-input-port').value = '22';
+  }
   $('hop-error').classList.add('hidden');
   $('hop-backdrop').classList.remove('hidden');
-  setTimeout(() => $('hop-input-host').focus(), 50);
+  const focusId = remembered ? 'hop-input-password' : 'hop-input-host';
+  setTimeout(() => $(focusId).focus(), 50);
 }
 
 function closeHopModal() {
@@ -306,7 +479,13 @@ async function handleHop() {
     return;
   }
 
-  // Success — update UI
+  // Success — remember this hop for the server we left, then update UI.
+  const sourceKey = serverMemoryKey(connectionInfo);
+  if (sourceKey) {
+    lastHopFromServer.set(sourceKey, { host, username, port: port || 22 });
+    persistFormMemoryNow();
+  }
+
   const prevLabel = connectionInfo
     ? `${connectionInfo.username}@${connectionInfo.host}`
     : 'previous server';
