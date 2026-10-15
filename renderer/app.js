@@ -5,6 +5,8 @@ let historyIndex  = -1;
 let viewMode      = 'list';   // 'grid' | 'list'
 let currentFiles  = [];
 let connectionInfo = null;
+let connectionChain = [];
+let serverExitInProgress = false;
 let isLoading     = false;
 
 // Main-form history and per-source-server hop history. Passwords are never stored.
@@ -85,6 +87,7 @@ function bindExplorerControls() {
   $('btn-up').addEventListener('click',      navigateUp);
   $('btn-refresh').addEventListener('click', () => loadDirectory(currentPath, false));
   $('btn-disconnect').addEventListener('click', handleDisconnect);
+  $('btn-exit').addEventListener('click', handleExit);
   $('btn-retry').addEventListener('click',   () => loadDirectory(currentPath, false));
   $('btn-view-grid').addEventListener('click', () => setViewMode('grid'));
   $('btn-view-list').addEventListener('click', () => setViewMode('list'));
@@ -251,13 +254,10 @@ async function handleConnect() {
     return;
   }
 
-  connectionInfo = { host, username, port, jump };
+  connectionChain = [{ host, username, port, jump }];
+  connectionInfo = connectionChain[0];
   rememberDirectConnect({ host, username, port, jump });
-  const label = jump
-    ? `${username}@${host} via ${jump.username}@${jump.host}`
-    : `${username}@${host}`;
-  $('titlebar-title').textContent     = `SSH Explorer — ${label}`;
-  $('status-connection').textContent  = `Connected: ${label}`;
+  refreshConnectionChrome();
 
   navHistory   = [];
   historyIndex = -1;
@@ -271,16 +271,123 @@ async function handleConnect() {
 
 async function handleDisconnect() {
   await window.api.disconnect();
+  resetToConnectScreen();
+}
+
+function connectionLabel(info) {
+  if (!info) return '';
+  if (info.jump) {
+    return `${info.username}@${info.host} via ${info.jump.username}@${info.jump.host}`;
+  }
+  if (info.via) {
+    return `${info.username}@${info.host} (via ${info.via})`;
+  }
+  return `${info.username}@${info.host}`;
+}
+
+function refreshConnectionChrome() {
+  const exitBtn = $('btn-exit');
+  const nested = connectionChain.length > 1;
+  exitBtn.classList.toggle('hidden', !nested);
+  if (nested) {
+    const prev = connectionChain[connectionChain.length - 2];
+    exitBtn.title = `Return to ${prev.username}@${prev.host}`;
+  } else {
+    exitBtn.title = 'Return to the previous server';
+  }
+
+  if (!connectionInfo) {
+    $('titlebar-title').textContent = 'SSH Explorer';
+    $('status-connection').textContent = 'Not connected';
+    return;
+  }
+
+  const label = connectionLabel(connectionInfo);
+  $('titlebar-title').textContent = `SSH Explorer — ${label}`;
+  $('status-connection').textContent = `Connected: ${label}`;
+}
+
+function clearDockerChrome() {
+  dockerMode = null;
+  $('btn-docker').classList.remove('hidden');
+  $('btn-docker-exit').classList.add('hidden');
+}
+
+function resetToConnectScreen(errorMessage) {
   connectionInfo = null;
-  navHistory     = [];
-  historyIndex   = -1;
-  currentFiles   = [];
-  $('titlebar-title').textContent = 'SSH Explorer';
-  $('file-container').innerHTML   = '';
-  $('status-items').textContent   = '';
+  connectionChain = [];
+  navHistory = [];
+  historyIndex = -1;
+  currentFiles = [];
+  clearDockerChrome();
+  if (remoteEditor.open) closeRemoteEditor();
+  closePreview();
+  closeHopModal();
+  clearClipboard();
+  $('file-container').innerHTML = '';
+  $('status-items').textContent = '';
   setConnecting(false);
   applyLastDirectConnect();
   showScreen('connect');
+  refreshConnectionChrome();
+  if (errorMessage) showConnectError(errorMessage);
+  else clearConnectError();
+}
+
+async function handleExit() {
+  if (serverExitInProgress) return;
+  if (remoteEditor.open) {
+    if (remoteEditor.saving || elevateDialogOpen()) return;
+    const dirty = remoteEditor.loaded
+      && window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
+    if (dirty) {
+      requestRemoteEditorExit();
+      return;
+    }
+    closeRemoteEditor();
+  }
+
+  if (connectionChain.length <= 1) {
+    await handleDisconnect();
+    return;
+  }
+
+  serverExitInProgress = true;
+  $('btn-exit').disabled = true;
+  try {
+    const result = await window.api.exit();
+    if (!result || result.disconnected || !result.success) {
+      resetToConnectScreen(result && result.error);
+      return;
+    }
+
+    connectionChain.pop();
+    connectionInfo = connectionChain[connectionChain.length - 1] || null;
+    if (!connectionInfo) {
+      resetToConnectScreen();
+      return;
+    }
+    if (result.connection) {
+      connectionInfo.host = result.connection.host || connectionInfo.host;
+      connectionInfo.username = result.connection.username || connectionInfo.username;
+      connectionInfo.port = result.connection.port || connectionInfo.port;
+    }
+
+    clearDockerChrome();
+    closePreview();
+    closeHopModal();
+    clearClipboard();
+    refreshConnectionChrome();
+
+    navHistory = [];
+    historyIndex = -1;
+    const homeResult = await window.api.homedir();
+    const homePath = (homeResult.success && homeResult.path) ? homeResult.path : '/';
+    await loadDirectory(homePath, true, true);
+  } finally {
+    serverExitInProgress = false;
+    $('btn-exit').disabled = false;
+  }
 }
 
 function serverMemoryKey(info) {
@@ -490,10 +597,8 @@ async function handleHop() {
     ? `${connectionInfo.username}@${connectionInfo.host}`
     : 'previous server';
   connectionInfo = { host, username, port, via: prevLabel };
-
-  const label = `${username}@${host} (via ${prevLabel})`;
-  $('titlebar-title').textContent    = `SSH Explorer — ${label}`;
-  $('status-connection').textContent = `Connected: ${label}`;
+  connectionChain.push(connectionInfo);
+  refreshConnectionChrome();
 
   closeHopModal();
 
@@ -1938,11 +2043,7 @@ function exitDockerMode() {
   dockerMode = null;
   $('btn-docker').classList.remove('hidden');
   $('btn-docker-exit').classList.add('hidden');
-
-  const info = connectionInfo;
-  const connLabel = info ? `${info.username}@${info.host}` : '';
-  $('titlebar-title').textContent    = `SSH Explorer — ${connLabel}`;
-  $('status-connection').textContent = `Connected: ${connLabel}`;
+  refreshConnectionChrome();
 
   navHistory   = [];
   historyIndex = -1;

@@ -443,6 +443,24 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
 }
 .hop-btn:hover { background: rgba(88, 166, 255, 0.1); border-color: var(--accent); }
 
+.exit-btn {
+  padding: 5px 11px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.exit-btn:hover {
+  background: rgba(240, 180, 41, 0.12);
+  border-color: rgba(240, 180, 41, 0.45);
+  color: #f0b429;
+}
+.exit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .disconnect-btn {
   padding: 5px 11px;
   background: none;

@@ -26,6 +26,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "ssh-nav.js",
       "form-memory.js",
       "renderer/**",
       "package.json",

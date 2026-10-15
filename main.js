@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const crypto = require('crypto');
 const path = require('path');
 const { loadFormMemory, saveFormMemory } = require('./form-memory');
-const { Client } = require('ssh2');
+const { SshNav } = require('./ssh-nav');
 const {
   assessRemoteChange,
   chooseWriteAccount,
@@ -15,14 +15,21 @@ const {
 } = require('./renderer/editor-state');
 
 let mainWindow   = null;
-let jumpClient   = null;   // first-hop (bastion) — null when not used
-let sshClient    = null;   // final target
+let sshClient    = null;   // logical server currently being browsed
 let sftpSession  = null;
 
 // SSH agent socket for key-based auth (no password needed on target)
 const agentSocket = process.platform === 'win32'
   ? '\\\\.\\pipe\\openssh-ssh-agent'
   : (process.env.SSH_AUTH_SOCK || undefined);
+
+const sshNav = new SshNav({
+  agentSocket,
+  onChange(client, sftp) {
+    sshClient = client;
+    sftpSession = sftp;
+  },
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -50,8 +57,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (sshClient)  sshClient.end();
-  if (jumpClient) jumpClient.end();
+  sshNav.cleanup();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -61,8 +67,7 @@ ipcMain.on('window:maximize', () => {
   mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize();
 });
 ipcMain.on('window:close', () => {
-  if (sshClient)  sshClient.end();
-  if (jumpClient) jumpClient.end();
+  sshNav.cleanup();
   mainWindow.close();
 });
 ipcMain.handle('window:is-maximized', () => mainWindow.isMaximized());
@@ -82,182 +87,13 @@ ipcMain.on('form-memory:flush', (event, data) => {
   }
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function cleanupConnections() {
-  if (sshClient)  { sshClient.end();  sshClient  = null; }
-  if (jumpClient) { jumpClient.end(); jumpClient = null; }
-  sftpSession = null;
-}
-
-/** Open SFTP on an already-ready ssh2 Client and resolve. */
-function openSftp(client, resolve) {
-  client.sftp((err, sftp) => {
-    if (err) {
-      client.end();
-      resolve({ success: false, error: `SFTP error: ${err.message}` });
-      return;
-    }
-    sshClient   = client;
-    sftpSession = sftp;
-    sftp.on('error', () => { sftpSession = null; });
-    resolve({ success: true });
-  });
-}
-
-/** Build connect options — include agent when no password supplied. */
-function buildConnectOpts(host, port, username, password, extra = {}) {
-  const opts = { host, port: port || 22, username, readyTimeout: 15000, ...extra };
-  if (password) {
-    opts.password = password;
-  } else {
-    // No password: try local SSH agent (key-based auth)
-    if (agentSocket) opts.agent = agentSocket;
-  }
-  return opts;
-}
-
-// ── SSH: Connect ──────────────────────────────────────────────────────────────
-ipcMain.handle('ssh:connect', (_event, { host, port, username, password, jump }) => {
-  return new Promise((resolve) => {
-    cleanupConnections();
-
-    // ── Direct connection (no jump host) ──────────────────────────────────────
-    if (!jump) {
-      const client  = new Client();
-      const timeout = setTimeout(() => {
-        client.destroy();
-        resolve({ success: false, error: 'Connection timed out after 15 seconds' });
-      }, 15000);
-
-      client.on('ready', () => { clearTimeout(timeout); openSftp(client, resolve); });
-      client.on('error', (err) => { clearTimeout(timeout); resolve({ success: false, error: err.message }); });
-      client.on('end',   () => { sshClient = null; sftpSession = null; });
-
-      try {
-        client.connect(buildConnectOpts(host, port, username, password));
-      } catch (err) {
-        clearTimeout(timeout);
-        resolve({ success: false, error: err.message });
-      }
-      return;
-    }
-
-    // ── Jump-host connection ──────────────────────────────────────────────────
-    // Step 1: connect to bastion
-    const jClient  = new Client();
-    const timeout  = setTimeout(() => {
-      jClient.destroy();
-      resolve({ success: false, error: 'Jump host connection timed out' });
-    }, 15000);
-
-    jClient.on('error', (err) => {
-      clearTimeout(timeout);
-      resolve({ success: false, error: `Jump host: ${err.message}` });
-    });
-
-    jClient.on('ready', () => {
-      clearTimeout(timeout);
-      jumpClient = jClient;
-
-      // Step 2: open a TCP channel through bastion to the target
-      jClient.forwardOut('127.0.0.1', 0, host, port || 22, (err, stream) => {
-        if (err) {
-          cleanupConnections();
-          resolve({ success: false, error: `Tunnel error: ${err.message}` });
-          return;
-        }
-
-        // Step 3: SSH handshake with the target over the tunnel
-        const tClient   = new Client();
-        const tTimeout  = setTimeout(() => {
-          tClient.destroy();
-          cleanupConnections();
-          resolve({ success: false, error: 'Target connection timed out' });
-        }, 15000);
-
-        tClient.on('ready', () => {
-          clearTimeout(tTimeout);
-          openSftp(tClient, resolve);
-        });
-        tClient.on('error', (err) => {
-          clearTimeout(tTimeout);
-          cleanupConnections();
-          resolve({ success: false, error: `Target: ${err.message}` });
-        });
-        tClient.on('end', () => { sshClient = null; sftpSession = null; });
-
-        try {
-          tClient.connect(buildConnectOpts(host, port, username, password, { sock: stream }));
-        } catch (err) {
-          clearTimeout(tTimeout);
-          cleanupConnections();
-          resolve({ success: false, error: err.message });
-        }
-      });
-    });
-
-    try {
-      jClient.connect(buildConnectOpts(jump.host, jump.port, jump.username, jump.password));
-    } catch (err) {
-      clearTimeout(timeout);
-      resolve({ success: false, error: `Jump host: ${err.message}` });
-    }
-  });
-});
-
-// ── SSH: Disconnect ───────────────────────────────────────────────────────────
-ipcMain.handle('ssh:disconnect', () => {
-  cleanupConnections();
-  return { success: true };
-});
-
-// ── SSH: Hop to another server through current connection ─────────────────────
-ipcMain.handle('ssh:hop', (_event, { host, port, username, password }) => {
-  return new Promise((resolve) => {
-    if (!sshClient) {
-      resolve({ success: false, error: 'Not connected to any server.' });
-      return;
-    }
-
-    const hopFrom = sshClient;   // use current connection as the tunnel
-
-    hopFrom.forwardOut('127.0.0.1', 0, host, port || 22, (fwdErr, stream) => {
-      if (fwdErr) {
-        resolve({ success: false, error: `Tunnel error: ${fwdErr.message}` });
-        return;
-      }
-
-      const tClient  = new Client();
-      const timeout  = setTimeout(() => {
-        tClient.destroy();
-        resolve({ success: false, error: 'Connection to target timed out.' });
-      }, 15000);
-
-      tClient.on('ready', () => {
-        clearTimeout(timeout);
-        // Promote current connection to jump slot, swap in the new target
-        if (jumpClient) jumpClient.end();
-        jumpClient  = hopFrom;
-        sshClient   = null;
-        sftpSession = null;
-        openSftp(tClient, resolve);
-      });
-
-      tClient.on('error', (err) => {
-        clearTimeout(timeout);
-        // Connection failed — original sshClient/sftpSession unchanged
-        resolve({ success: false, error: err.message });
-      });
-
-      try {
-        tClient.connect(buildConnectOpts(host, port, username, password, { sock: stream }));
-      } catch (err) {
-        clearTimeout(timeout);
-        resolve({ success: false, error: err.message });
-      }
-    });
-  });
-});
+// ── SSH: Connect, hop, exit, disconnect ───────────────────────────────────────
+// ssh-nav keeps the logical server stack. sshClient and sftpSession always
+// refer to the server the user is browsing.
+ipcMain.handle('ssh:connect', (_event, opts) => sshNav.connect(opts));
+ipcMain.handle('ssh:hop', (_event, opts) => sshNav.hop(opts));
+ipcMain.handle('ssh:exit', () => sshNav.exit());
+ipcMain.handle('ssh:disconnect', () => sshNav.disconnect());
 
 // ── SSH: Rename ───────────────────────────────────────────────────────────────
 ipcMain.handle('ssh:rename', (_event, { oldPath, newPath }) => {

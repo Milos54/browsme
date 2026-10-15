@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   // SSH / SFTP
   connect:    (opts)  => ipcRenderer.invoke('ssh:connect', opts),
   disconnect: ()      => ipcRenderer.invoke('ssh:disconnect'),
+  exit:       ()      => ipcRenderer.invoke('ssh:exit'),
   hop:        (opts)  => ipcRenderer.invoke('ssh:hop', opts),
   rename:     (oldPath, newPath) => ipcRenderer.invoke('ssh:rename', { oldPath, newPath }),
 
