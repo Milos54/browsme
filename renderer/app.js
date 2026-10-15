@@ -257,6 +257,8 @@ async function handleConnect() {
   connectionChain = [{ host, username, port, jump }];
   connectionInfo = connectionChain[0];
   rememberDirectConnect({ host, username, port, jump });
+  if (remoteEditor.open) closeRemoteEditor();
+  clearDockerChrome();
   refreshConnectionChrome();
 
   navHistory   = [];
@@ -270,6 +272,11 @@ async function handleConnect() {
 }
 
 async function handleDisconnect() {
+  leaveEditorThen(() => { void finishDisconnect(); });
+}
+
+async function finishDisconnect() {
+  clearDockerChrome();
   await window.api.disconnect();
   resetToConnectScreen();
 }
@@ -311,6 +318,11 @@ function clearDockerChrome() {
   dockerMode = null;
   $('btn-docker').classList.remove('hidden');
   $('btn-docker-exit').classList.add('hidden');
+  if (clipboardItem) {
+    $('btn-paste').classList.remove('hidden');
+    $('btn-paste-clear').classList.remove('hidden');
+    $('paste-sep').classList.remove('hidden');
+  }
 }
 
 function resetToConnectScreen(errorMessage) {
@@ -338,9 +350,7 @@ async function handleExit() {
   if (serverExitInProgress) return;
   if (remoteEditor.open) {
     if (remoteEditor.saving || elevateDialogOpen()) return;
-    const dirty = remoteEditor.loaded
-      && window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
-    if (dirty) {
+    if (editorIsDirty()) {
       requestRemoteEditorExit();
       return;
     }
@@ -568,6 +578,15 @@ async function handleHop() {
     return;
   }
 
+  leaveEditorThen(() => { void performHop(host, username, password, port); });
+}
+
+async function performHop(host, username, password, port) {
+  const returnPath = dockerMode ? (preDockerPath || '/') : currentPath;
+  const wasDocker = !!dockerMode;
+  clearDockerChrome();
+  closePreview();
+
   // Show spinner
   $('btn-hop-connect').disabled  = true;
   $('hop-btn-text').textContent  = 'Connecting…';
@@ -583,6 +602,7 @@ async function handleHop() {
   if (!result.success) {
     $('hop-error').textContent = result.error || 'Connection failed.';
     $('hop-error').classList.remove('hidden');
+    if (wasDocker) await loadDirectory(returnPath, true, true);
     return;
   }
 
@@ -833,8 +853,9 @@ function activateFileItem(item) {
     return;
   }
   if (file.isSymlink) return;
-  // Container files keep the existing preview. Do not send them through SFTP editing.
-  if (dockerMode || isReadOnlyExtension(file.name)) {
+  // Known binary types stay on the preview. Container text files use the same
+  // editor as server files, and the save path is chosen from the open target.
+  if (isReadOnlyExtension(file.name)) {
     openPreview(filePath, file.name, file.size);
   } else {
     openRemoteEditor(filePath, file.name, file.size);
@@ -1203,7 +1224,7 @@ function highlightJson(json) {
   );
 }
 
-// ── Remote text editor (SFTP only) ─────────────────────────────────────────────
+// ── Remote text editor (SFTP host files and Docker container files) ───────────
 const READ_ONLY_EXTENSIONS = new Set([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'tif', 'tiff',
   'mp3', 'wav', 'flac', 'ogg', 'mp4', 'mkv', 'avi', 'mov', 'webm',
@@ -1226,18 +1247,48 @@ const remoteEditor = {
   loaded: false,
   saving: false,
   pendingExit: false,
+  pendingLeave: null,
   path: '',
   baseline: '',
   newline: 'lf',
   mtime: null,
   size: null,
   sessionKey: '',
+  targetKind: 'sftp',
+  containerId: '',
+  containerName: '',
   statusTimer: null,
 };
 
-function currentSessionKey() {
+function currentConnectionKey() {
   if (!connectionInfo) return '';
   return `${connectionInfo.username}@${connectionInfo.host}:${connectionInfo.port || 22}`;
+}
+
+function currentEditorTarget() {
+  if (dockerMode && dockerMode.id) {
+    return {
+      kind: 'docker',
+      containerId: dockerMode.id,
+      containerName: dockerMode.name || '',
+    };
+  }
+  return { kind: 'sftp', containerId: '', containerName: '' };
+}
+
+function currentSessionKey() {
+  return window.editorState.editingSessionKey(currentConnectionKey(), currentEditorTarget());
+}
+
+function editorLocation(filePath) {
+  if (remoteEditor.targetKind !== 'docker') return filePath;
+  const name = remoteEditor.containerName || remoteEditor.containerId || 'container';
+  return `${name}:${filePath}`;
+}
+
+function presentEditorError(result, fallback) {
+  if (remoteEditor.targetKind === 'docker') return dockerSafeError(result, fallback);
+  return (result && result.error) || fallback;
 }
 
 function captureCaret(el) {
@@ -1325,7 +1376,8 @@ function showUnsavedDialog() {
   }, 0);
 }
 
-function dismissUnsavedDialog() {
+function dismissUnsavedDialog(opts) {
+  if (!opts || opts.keepLeave !== true) remoteEditor.pendingLeave = null;
   $('editor-confirm-backdrop').classList.add('hidden');
   setConfirmError('');
   if (remoteEditor.open && remoteEditor.loaded && $('editor-conflict-backdrop').classList.contains('hidden') && !remoteEditor.saving) {
@@ -1352,7 +1404,9 @@ function dismissRemoteConflict() {
   if (remoteEditor.loaded) $('editor-text').focus();
 }
 
-function closeRemoteEditor() {
+function closeRemoteEditor(opts) {
+  const leave = opts && opts.runLeave ? remoteEditor.pendingLeave : null;
+  remoteEditor.pendingLeave = null;
   remoteEditor.gen += 1;
   remoteEditor.open = false;
   remoteEditor.loaded = false;
@@ -1364,6 +1418,9 @@ function closeRemoteEditor() {
   remoteEditor.mtime = null;
   remoteEditor.size = null;
   remoteEditor.sessionKey = '';
+  remoteEditor.targetKind = 'sftp';
+  remoteEditor.containerId = '';
+  remoteEditor.containerName = '';
   if (remoteEditor.statusTimer) {
     clearTimeout(remoteEditor.statusTimer);
     remoteEditor.statusTimer = null;
@@ -1384,15 +1441,39 @@ function closeRemoteEditor() {
   status.title = '';
   status.className = 'editor-status';
   setRemoteEditorSaving(false);
+  if (typeof leave === 'function') leave();
+}
+
+function editorIsDirty() {
+  return remoteEditor.open
+    && remoteEditor.loaded
+    && window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
+}
+
+// Ask before dropping a dirty buffer, then run the navigation that was requested.
+function leaveEditorThen(action) {
+  if (remoteEditor.saving || elevateDialogOpen()) return;
+  if (remoteEditor.pendingLeave) return;
+  if (!remoteEditor.open) {
+    action();
+    return;
+  }
+  if (!$('editor-conflict-backdrop').classList.contains('hidden')) return;
+  if (!editorIsDirty()) {
+    closeRemoteEditor();
+    action();
+    return;
+  }
+  remoteEditor.pendingLeave = action;
+  setConfirmError('');
+  showUnsavedDialog();
 }
 
 function requestRemoteEditorExit() {
   if (!remoteEditor.open || remoteEditor.saving) return;
   if (elevateDialogOpen()) return;
-  const dirty = remoteEditor.loaded
-    && window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
-  if (!dirty) {
-    closeRemoteEditor();
+  if (!editorIsDirty()) {
+    closeRemoteEditor({ runLeave: true });
     return;
   }
   setConfirmError('');
@@ -1401,22 +1482,27 @@ function requestRemoteEditorExit() {
 
 function discardRemoteEditor() {
   if (remoteEditor.saving) return;
-  closeRemoteEditor();
+  closeRemoteEditor({ runLeave: true });
 }
 
 async function openRemoteEditor(filePath, fileName, fileSize) {
   const api = window.editorState;
+  const target = currentEditorTarget();
   const gen = ++remoteEditor.gen;
   remoteEditor.open = true;
   remoteEditor.loaded = false;
   remoteEditor.saving = false;
   remoteEditor.pendingExit = false;
+  remoteEditor.pendingLeave = null;
   remoteEditor.path = filePath;
   remoteEditor.baseline = '';
   remoteEditor.newline = 'lf';
   remoteEditor.mtime = null;
   remoteEditor.size = null;
-  remoteEditor.sessionKey = currentSessionKey();
+  remoteEditor.targetKind = target.kind;
+  remoteEditor.containerId = target.containerId || '';
+  remoteEditor.containerName = target.containerName || '';
+  remoteEditor.sessionKey = api.editingSessionKey(currentConnectionKey(), target);
 
   closePreview();
   $('editor-confirm-backdrop').classList.add('hidden');
@@ -1424,11 +1510,12 @@ async function openRemoteEditor(filePath, fileName, fileSize) {
   setConfirmError('');
   setRemoteEditorStatus('', '');
 
+  const location = editorLocation(filePath);
   $('editor-icon').textContent = getFileIcon(fileName, false, false);
   $('editor-filename').textContent = fileName;
   $('editor-filename').title = fileName;
-  $('editor-path').textContent = filePath;
-  $('editor-path').title = filePath;
+  $('editor-path').textContent = location;
+  $('editor-path').title = location;
   $('editor-dirty').classList.add('hidden');
   $('editor-text').value = '';
   $('editor-text').classList.add('hidden');
@@ -1440,7 +1527,9 @@ async function openRemoteEditor(filePath, fileName, fileSize) {
 
   let result;
   try {
-    result = await window.api.readfile(filePath);
+    result = remoteEditor.targetKind === 'docker'
+      ? await window.api.dockerReadfile(remoteEditor.containerId, filePath)
+      : await window.api.readfile(filePath);
   } catch (err) {
     result = { success: false, error: (err && err.message) || 'Could not read file.' };
   }
@@ -1457,7 +1546,15 @@ async function openRemoteEditor(filePath, fileName, fileSize) {
   $('editor-loading').classList.add('hidden');
 
   if (!result || !result.success || typeof result.content !== 'string') {
-    $('editor-load-error').textContent = (result && result.error) || 'Could not read file.';
+    $('editor-load-error').textContent = presentEditorError(result, 'Could not read file.');
+    $('editor-load-error').classList.remove('hidden');
+    $('editor-save').disabled = true;
+    $('editor-exit').focus();
+    return;
+  }
+
+  if (!Number.isFinite(result.mtime) || !Number.isFinite(result.size)) {
+    $('editor-load-error').textContent = 'The file modification time is unavailable, so it cannot be edited safely.';
     $('editor-load-error').classList.remove('hidden');
     $('editor-save').disabled = true;
     $('editor-exit').focus();
@@ -1468,10 +1565,9 @@ async function openRemoteEditor(filePath, fileName, fileSize) {
   const area = $('editor-text');
   area.value = api.toEditorText(result.content);
   remoteEditor.baseline = area.value;
-  remoteEditor.mtime = Number.isFinite(result.mtime) ? result.mtime : null;
-  remoteEditor.size = Number.isFinite(result.size) ? result.size : null;
+  remoteEditor.mtime = result.mtime;
+  remoteEditor.size = result.size;
   remoteEditor.loaded = true;
-  remoteEditor.sessionKey = currentSessionKey();
   area.classList.remove('hidden');
   refreshRemoteEditorDirty();
   setRemoteEditorSaving(false);
@@ -1601,6 +1697,10 @@ function promptElevatedSave(force, info) {
       return { success: false, error: api.CONNECTION_LOST_MESSAGE };
     }
 
+    if (remoteEditor.targetKind === 'docker') {
+      return { success: false, error: 'Container files are not saved through another server account.' };
+    }
+
     const text = area.value;
     remoteEditor.saving = true;
     setRemoteEditorSaving(true);
@@ -1641,9 +1741,9 @@ function promptElevatedSave(force, info) {
     remoteEditor.mtime = applied.mtime;
     remoteEditor.size = applied.size;
     refreshRemoteEditorDirty();
-    dismissUnsavedDialog();
+    dismissUnsavedDialog({ keepLeave: true });
     dismissRemoteConflict();
-    closeRemoteEditor();
+    closeRemoteEditor({ runLeave: true });
     return result;
   });
 }
@@ -1666,15 +1766,22 @@ async function saveRemoteEditor(opts) {
   if (api.saveAction(text, remoteEditor.baseline) === 'skip') {
     setRemoteEditorStatus('ok', 'No changes to save');
     refreshRemoteEditorDirty();
-    if (exitAfter) closeRemoteEditor();
+    if (exitAfter) closeRemoteEditor({ runLeave: true });
     else dismissUnsavedDialog();
     return;
   }
 
   if (!api.sameEditingSession(remoteEditor.sessionKey, currentSessionKey())) {
-    setRemoteEditorStatus('error', api.CONNECTION_LOST_MESSAGE);
+    const connectionKey = currentConnectionKey();
+    const containerLeft = remoteEditor.targetKind === 'docker'
+      && connectionKey
+      && remoteEditor.sessionKey.startsWith(`${connectionKey}|docker:`);
+    const blocked = containerLeft
+      ? 'This container is no longer the one being browsed, so the file was not saved.'
+      : api.CONNECTION_LOST_MESSAGE;
+    setRemoteEditorStatus('error', blocked);
     if (exitAfter || !$('editor-confirm-backdrop').classList.contains('hidden')) {
-      setConfirmError(api.CONNECTION_LOST_MESSAGE);
+      setConfirmError(blocked);
       showUnsavedDialog();
     }
     return;
@@ -1690,23 +1797,27 @@ async function saveRemoteEditor(opts) {
 
   try {
     const content = api.prepareForSave(text, remoteEditor.newline);
-    const result = await window.api.writefile(remoteEditor.path, content, {
+    const saveOptions = {
       expectedMtime: remoteEditor.mtime,
       expectedSize: remoteEditor.size,
       force,
-    });
+    };
+    const route = api.saveRoute(remoteEditor.targetKind);
+    const result = route === 'docker-writefile'
+      ? await window.api.dockerWritefile(remoteEditor.containerId, remoteEditor.path, content, saveOptions)
+      : await window.api.writefile(remoteEditor.path, content, saveOptions);
 
     if (!remoteEditor.open || gen !== remoteEditor.gen) return;
 
     if (result && result.conflict) {
-      const msg = result.error || 'The remote file has changed since you opened or last saved it. It was not overwritten.';
+      const msg = presentEditorError(result, 'The remote file has changed since you opened or last saved it. It was not overwritten.');
       setRemoteEditorStatus('error', msg);
       if (keepConfirm) setConfirmError(msg);
       showRemoteConflict(msg);
       return;
     }
 
-    if (result && result.needsElevation) {
+    if (result && result.needsElevation && remoteEditor.targetKind !== 'docker') {
       const prompt = window.editorState.elevationPrompt(result);
       setRemoteEditorStatus('error', `Permission denied. Enter the password for ${prompt.username} to save.`);
       promptElevatedSave(force, result);
@@ -1715,9 +1826,10 @@ async function saveRemoteEditor(opts) {
 
     const applied = api.applySaveResult(remoteEditor.baseline, text, result);
     if (!applied.saved) {
-      const msg = (result && result.error) || 'Save failed.';
-      const lost = /not connected|connection was lost|connection lost/i.test(msg);
-      const shown = lost ? api.CONNECTION_LOST_MESSAGE : msg;
+      const msg = presentEditorError(result, 'Save failed.');
+      const shown = result && result.uncertain
+        ? msg
+        : (/not connected|connection was lost|connection lost/i.test(msg) ? api.CONNECTION_LOST_MESSAGE : msg);
       setRemoteEditorStatus('error', shown);
       dismissRemoteConflict();
       if (keepConfirm) {
@@ -1733,10 +1845,11 @@ async function saveRemoteEditor(opts) {
     remoteEditor.mtime = applied.mtime;
     remoteEditor.size = applied.size;
     refreshRemoteEditorDirty();
-    dismissUnsavedDialog();
+    const leaving = typeof remoteEditor.pendingLeave === 'function';
+    dismissUnsavedDialog({ keepLeave: true });
     dismissRemoteConflict();
-    closeRemoteEditor();
-    loadDirectory(currentPath, false);
+    closeRemoteEditor({ runLeave: true });
+    if (!leaving) loadDirectory(currentPath, false);
   } catch (err) {
     if (!remoteEditor.open || gen !== remoteEditor.gen) return;
     const msg = (err && err.message) || 'Save failed.';
@@ -2020,8 +2133,13 @@ async function fetchContainers() {
 }
 
 async function enterDockerMode(container) {
-  preDockerPath = currentPath;
-  dockerMode    = { id: container.id, name: container.name, image: container.image };
+  leaveEditorThen(() => { void beginDockerMode(container); });
+}
+
+async function beginDockerMode(container) {
+  if (!container || !container.id) return;
+  if (!dockerMode) preDockerPath = currentPath;
+  dockerMode = { id: container.id, name: container.name, image: container.image };
 
   // Update UI
   $('btn-docker').classList.add('hidden');
@@ -2040,14 +2158,15 @@ async function enterDockerMode(container) {
 }
 
 function exitDockerMode() {
-  dockerMode = null;
-  $('btn-docker').classList.remove('hidden');
-  $('btn-docker-exit').classList.add('hidden');
-  refreshConnectionChrome();
-
-  navHistory   = [];
-  historyIndex = -1;
-  loadDirectory(preDockerPath, true, true);
+  leaveEditorThen(() => {
+    const returnPath = preDockerPath || '/';
+    clearDockerChrome();
+    closePreview();
+    refreshConnectionChrome();
+    navHistory = [];
+    historyIndex = -1;
+    loadDirectory(returnPath, true, true);
+  });
 }
 
 // ── Clipboard (server-side copy) ───────────────────────────────────────────────

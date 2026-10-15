@@ -1,5 +1,5 @@
-// Pure editor decisions shared by the renderer and the SFTP save handler.
-// No DOM, SSH, or Docker behavior lives here.
+// Pure editor decisions shared by the renderer and the save handlers.
+// No DOM and no SSH or Docker command execution lives here.
 (function (factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -55,6 +55,21 @@
     return !!openKey && openKey === currentKey;
   }
 
+  // Docker container ids are 12 to 64 hex characters, the same rule as docker-files.js.
+  function editingSessionKey(connectionKey, target) {
+    const base = String(connectionKey || '').trim();
+    if (!base) return '';
+    if (!target || target.kind !== 'docker') return base;
+    const id = String(target.containerId || '').trim().toLowerCase();
+    if (!/^[a-f0-9]{12,64}$/.test(id)) return '';
+    return `${base}|docker:${id}`;
+  }
+
+  // Container bytes go to the Docker writer. Host files stay on SFTP.
+  function saveRoute(targetKind) {
+    return targetKind === 'docker' ? 'docker-writefile' : 'sftp-writefile';
+  }
+
   // Reads that should stay on the existing preview, not the editor.
   function isPreviewOnlyRead(result) {
     if (!result) return false;
@@ -63,6 +78,7 @@
       const msg = String(result.error || '');
       if (/binary file/i.test(msg)) return true;
       if (/too large/i.test(msg)) return true;
+      if (/not valid utf-8/i.test(msg)) return true;
     }
     return false;
   }
@@ -254,6 +270,8 @@
     hasUnsavedChanges,
     saveAction,
     sameEditingSession,
+    editingSessionKey,
+    saveRoute,
     isPreviewOnlyRead,
     assessRemoteChange,
     applySaveResult,

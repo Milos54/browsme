@@ -13,6 +13,15 @@ const {
   isSuAuthFailure,
   usefulTerminalError,
 } = require('./renderer/editor-state');
+const {
+  DOCKER_MISSING_MSG,
+  escapeSh,
+  guardWriteChannel,
+  isDockerMissingOutput,
+  readContainerFile,
+  saveContainerFile,
+  statContainerFile,
+} = require('./docker-files');
 
 let mainWindow   = null;
 let sshClient    = null;   // logical server currently being browsed
@@ -159,6 +168,88 @@ function endChannel(stream) {
   } catch { /* already closed */ }
 }
 
+// Binary-safe exec without a PTY. stdin, when present, is written exactly.
+function runRemote(spec) {
+  return new Promise((resolve) => {
+    const empty = () => Buffer.alloc(0);
+    if (!sshClient) {
+      resolve({ code: -1, stdout: empty(), stderr: Buffer.from('Not connected') });
+      return;
+    }
+    if (!spec || spec.pty === true || typeof spec.command !== 'string' || !spec.command) {
+      resolve({ code: -1, stdout: empty(), stderr: Buffer.from('Container file commands do not use a terminal.') });
+      return;
+    }
+    const timeoutMs = spec.timeoutMs || 30000;
+    let settled = false;
+    let timer = null;
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    sshClient.exec(spec.command, (err, stream) => {
+      if (err) {
+        finish({ code: -1, stdout: empty(), stderr: Buffer.from(err.message || 'exec failed') });
+        return;
+      }
+      timer = setTimeout(() => {
+        endChannel(stream);
+        finish({
+          code: -1,
+          stdout: Buffer.concat(stdoutChunks),
+          stderr: Buffer.concat([
+            Buffer.concat(stderrChunks),
+            Buffer.from('\nThe server did not answer in time.'),
+          ]),
+        });
+      }, timeoutMs);
+      stream.on('data', (d) => { stdoutChunks.push(Buffer.from(d)); });
+      stream.stderr.on('data', (d) => { stderrChunks.push(Buffer.from(d)); });
+      stream.on('error', (streamErr) => {
+        finish({
+          code: -1,
+          stdout: Buffer.concat(stdoutChunks),
+          stderr: Buffer.concat([
+            Buffer.concat(stderrChunks),
+            Buffer.from((streamErr && streamErr.message) || 'stream error'),
+          ]),
+        });
+      });
+      if (spec.stdin != null) {
+        const buf = Buffer.isBuffer(spec.stdin) ? spec.stdin : Buffer.from(String(spec.stdin), 'utf8');
+        const endStdin = () => {
+          try { stream.end(); } catch { /* already closed */ }
+        };
+        if (!buf.length || stream.write(buf)) endStdin();
+        else stream.once('drain', endStdin);
+      }
+      stream.on('close', (code) => {
+        finish({
+          code: code == null ? -1 : code,
+          stdout: Buffer.concat(stdoutChunks),
+          stderr: Buffer.concat(stderrChunks),
+        });
+      });
+    });
+  });
+}
+
+function containerFileEnv() {
+  const client = sshClient;
+  return {
+    connected() {
+      return !!client && sshClient === client;
+    },
+    run(spec) {
+      return runRemote(spec);
+    },
+  };
+}
+
 // su reads the target account's password from a terminal. A PTY is required;
 // piping the password on stdin (the way sudo -S works) is ignored.
 function runPty(cmd, password, timeoutMs = 30000) {
@@ -215,8 +306,6 @@ function runPty(cmd, password, timeoutMs = 30000) {
     });
   });
 }
-
-function escapeSh(p) { return "'" + p.replace(/'/g, "'\\''") + "'"; }
 
 ipcMain.handle('ssh:delete', async (_event, { path: targetPath }) => {
   const { code, stderr } = await runExec(`rm -rf ${escapeSh(targetPath)}`);
@@ -353,12 +442,6 @@ function parseLsLa(output) {
 }
 
 // Shown when the remote host has no docker binary. Kept identical in the renderer.
-const DOCKER_MISSING_MSG = 'No docker containers found or maybe no docker installed';
-
-function isDockerMissingOutput(text) {
-  return /\bdocker(?:\.exe)?:\s*(?:command\s+)?not found\b/i.test(String(text || ''));
-}
-
 function dockerMissingResult() {
   return { success: false, unavailable: true, error: DOCKER_MISSING_MSG };
 }
@@ -430,33 +513,32 @@ ipcMain.handle('ssh:docker-readdir', async (_event, { containerId, path: dirPath
 });
 
 // ── Docker: read file ─────────────────────────────────────────────────────────
+// Returns validated UTF-8 text plus the size and best available mtime.
+// Symlinks are refused here and are not followed.
 ipcMain.handle('ssh:docker-readfile', async (_event, { containerId, path: filePath }) => {
   try {
-    if (!containerId) return { success: false, error: 'No container selected' };
-
-    // Check size via wc -c (universally available, no need for stat)
-    const sizeResult = await runExec(
-      `docker exec ${escapeSh(containerId)} /bin/sh -c ${escapeSh(`wc -c < ${escapeSh(filePath)}`)}`
-    );
-    if (isDockerMissingOutput(`${sizeResult.stderr}\n${sizeResult.stdout}`)) return dockerMissingResult();
-
-    const size = parseInt(sizeResult.stdout.trim()) || 0;
-    if (size > 1024 * 1024) {
-      return { success: false, error: `File is too large to preview (${(size / 1024 / 1024).toFixed(1)} MB). Limit is 1 MB.` };
-    }
-
-    const { code, stdout, stderr } = await runExec(
-      `docker exec ${escapeSh(containerId)} cat ${escapeSh(filePath)}`
-    );
-    if (isDockerMissingOutput(`${stderr}\n${stdout}`)) return dockerMissingResult();
-    if (code !== 0) return dockerError(stderr, 'Cannot read file');
-
-    // Binary check
-    if (stdout.includes('\x00')) return { success: false, error: 'Binary file — cannot preview.' };
-
-    return { success: true, content: stdout, size };
+    return await readContainerFile(containerFileEnv(), { containerId, path: filePath });
   } catch (err) {
     return { success: false, error: err.message || 'Cannot read file' };
+  }
+});
+
+ipcMain.handle('ssh:docker-stat', async (_event, { containerId, path: filePath }) => {
+  try {
+    return await statContainerFile(containerFileEnv(), { containerId, path: filePath });
+  } catch (err) {
+    return { success: false, error: err.message || 'Cannot inspect file' };
+  }
+});
+
+// In-place container write. This path never calls the SFTP write handlers.
+ipcMain.handle('ssh:docker-writefile', async (_event, payload) => {
+  const guard = guardWriteChannel('docker', payload);
+  if (!guard.ok) return { success: false, error: guard.error };
+  try {
+    return await saveContainerFile(containerFileEnv(), payload);
+  } catch (err) {
+    return { success: false, error: err.message || 'Save failed' };
   }
 });
 
@@ -938,6 +1020,8 @@ ipcMain.handle('ssh:readfile', (_event, { path: filePath }) => {
 
 // ── SSH: Write file contents (regular SFTP files only) ───────────────────────
 ipcMain.handle('ssh:writefile', async (_event, payload) => {
+  const guard = guardWriteChannel('sftp', payload);
+  if (!guard.ok) return { success: false, error: guard.error };
   const sftp = sftpSession;
   if (!sftp) {
     return { success: false, error: 'Saving is unavailable because the connection was lost.' };
@@ -960,6 +1044,8 @@ ipcMain.handle('ssh:writefile', async (_event, payload) => {
 // Permission was denied for the SSH account. Stage the new text, then su to
 // the account that can write and overwrite the existing file in place.
 ipcMain.handle('ssh:writefile-as', async (_event, payload) => {
+  const guard = guardWriteChannel('sftp', payload);
+  if (!guard.ok) return { success: false, error: guard.error };
   const sftp = sftpSession;
   if (!sftp || !sshClient) {
     return { success: false, error: 'Saving is unavailable because the connection was lost.' };

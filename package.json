@@ -7,6 +7,7 @@
   "license": "ISC",
   "scripts": {
     "start": "electron .",
+    "test": "node --test",
     "build": "electron-builder --win --x64"
   },
   "keywords": ["ssh", "sftp", "electron", "file-explorer"],
@@ -27,6 +28,7 @@
       "main.js",
       "preload.js",
       "ssh-nav.js",
+      "docker-files.js",
       "form-memory.js",
       "renderer/**",
       "package.json",
