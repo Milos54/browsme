@@ -10,11 +10,25 @@
 
 ------ DONE ------- 
 
------- TODO -------   
 
 - On first page of app where there are ssh inputs we want to prepopulate fields with last server that user ssh to, every filed excepts password. There is also same form for jumping across the servers to connect from server to server, those should be different for this functionality, first ssh screen when users opens app should prepopulate fields with values from last time user ssh from that screen, if he connects from there and then clicks from server connect to server(jump host) that jump form should be prepopulated with values from last time he did server jump from that server that he is connecting from now. Meaning that if user jumps host from first server that was never used to jump host before, that jump host form should not be prepopulated. Only if he has before ssh from server to server. We want to keep this data in memory, so each server should have piece in memory and association if someone ssh to another serber from that and use that value to prepopulate that jump host form. 
+
+- Docker change
+
+
+------ TODO -------   
+ 
+
  
 - In folder on server, we want to display 3 sugestions on top of folder, above this suggestions should be title: commonly used 
 And bellow that 3 suggestions 
 
 What protocol does this app use 
+
+
+
+- Implement CTRL + F to open serach baron top right or corner when we are in file  omn server 
+
+
+
+

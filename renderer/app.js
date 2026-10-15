@@ -22,6 +22,12 @@ const TYPE_AHEAD_MS = 1000;
 let typeAheadQuery = '';
 let typeAheadAt = 0;
 
+// In-memory find query for this app session. Closing the bar or changing
+// directory does not erase it, and it is not written to disk.
+let findState = window.appSearch.createFindState();
+let findEditorMatches = [];
+let editorCharWidth = { key: '', width: 8 };
+
 const $ = (id) => document.getElementById(id);
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
@@ -193,7 +199,19 @@ function bindExplorerControls() {
     saveRemoteEditor({ exitAfter: remoteEditor.pendingExit, force: true });
   });
   $('editor-text').addEventListener('input', refreshRemoteEditorDirty);
-  // Capture phase so Ctrl/Cmd+S and Escape are handled before the file list.
+  $('editor-text').addEventListener('scroll', () => {
+    if (findState.open && findState.mode === 'editor') paintEditorFind(false);
+  });
+  window.addEventListener('resize', () => {
+    if (findState.open && findState.mode === 'editor') paintEditorFind(false);
+  });
+  $('find-input').addEventListener('input', onFindInput);
+  $('find-close').addEventListener('click', () => closeFindBar());
+  $('find-next').addEventListener('click', () => stepFind(1));
+  $('find-prev').addEventListener('click', () => stepFind(-1));
+  // Capture phase, and before the editor handler, so Ctrl/Cmd+F and Escape
+  // close or focus search without saving, exiting, or opening Chromium find.
+  document.addEventListener('keydown', handleFindKeydown, true);
   document.addEventListener('keydown', handleRemoteEditorKeydown, true);
 
   document.addEventListener('keydown', (e) => {
@@ -333,6 +351,7 @@ function resetToConnectScreen(errorMessage) {
   currentFiles = [];
   clearDockerChrome();
   if (remoteEditor.open) closeRemoteEditor();
+  closeFindBar({ restoreEditorFocus: false, rerender: false });
   closePreview();
   closeHopModal();
   clearClipboard();
@@ -391,6 +410,7 @@ async function handleExit() {
 
     navHistory = [];
     historyIndex = -1;
+    closeFindBar({ restoreEditorFocus: false, rerender: false });
     const homeResult = await window.api.homedir();
     const homePath = (homeResult.success && homeResult.path) ? homeResult.path : '/';
     await loadDirectory(homePath, true, true);
@@ -584,6 +604,7 @@ async function handleHop() {
 async function performHop(host, username, password, port) {
   const returnPath = dockerMode ? (preDockerPath || '/') : currentPath;
   const wasDocker = !!dockerMode;
+  closeFindBar({ restoreEditorFocus: false });
   clearDockerChrome();
   closePreview();
 
@@ -650,9 +671,12 @@ async function loadDirectory(dirPath, pushHistory = true, focusFirst = false) {
   if (isLoading) return;
   isLoading = true;
 
+  if (dirPath !== currentPath) closeFindBar({ restoreEditorFocus: false });
+
   setLoading(true);
   hideFileError();
   $('empty-msg').classList.add('hidden');
+  $('find-empty-msg').classList.add('hidden');
 
   let result;
   try {
@@ -682,11 +706,8 @@ async function loadDirectory(dirPath, pushHistory = true, focusFirst = false) {
 
   updateBreadcrumb(dirPath);
   updateNavButtons();
-  renderFiles(currentFiles);
+  renderBrowser();
   if (focusFirst) focusFirstFileItem();
-
-  const count = currentFiles.length;
-  $('status-items').textContent = `${count} item${count !== 1 ? 's' : ''}`;
 }
 
 function navigateHistory(delta) {
@@ -743,21 +764,53 @@ function updateBreadcrumb(dirPath) {
 }
 
 // ── Render files ───────────────────────────────────────────────────────────────
-function renderFiles(files) {
+function renderBrowser() {
+  const files = window.appSearch.directoryResults(findState, currentFiles);
+  const filtering = window.appSearch.browserIsFiltered(findState);
+  if (filtering) {
+    findState.matchIndex = window.appSearch.clampMatchIndex(findState.matchIndex, files.length);
+  }
+  renderFiles(files, {
+    query: filtering ? findState.query : '',
+    currentIndex: filtering ? findState.matchIndex : -1,
+  });
+  if (findState.open && findState.mode === 'browser') updateFindCount(findState.matchIndex, filtering ? files.length : 0);
+  updateItemStatus(files.length);
+  syncFindButtons();
+}
+
+function updateItemStatus(shownCount) {
+  if (window.appSearch.browserIsFiltered(findState)) {
+    $('status-items').textContent = shownCount
+      ? `${shownCount} matching item${shownCount === 1 ? '' : 's'}`
+      : window.appSearch.NO_DIRECTORY_MATCHES;
+    return;
+  }
+  const count = currentFiles.length;
+  $('status-items').textContent = `${count} item${count !== 1 ? 's' : ''}`;
+}
+
+function renderFiles(files, findOpts) {
   resetTypeAhead();
+  const query = findOpts && findOpts.query ? String(findOpts.query) : '';
+  const currentIndex = findOpts && Number.isInteger(findOpts.currentIndex) ? findOpts.currentIndex : -1;
   const container      = $('file-container');
   container.innerHTML  = '';
   container.className  = viewMode === 'list' ? 'file-list' : 'file-grid';
 
   if (files.length === 0) {
-    $('empty-msg').classList.remove('hidden');
+    $('empty-msg').classList.toggle('hidden', !!query);
+    $('find-empty-msg').classList.toggle('hidden', !query);
     return;
   }
+
+  $('empty-msg').classList.add('hidden');
+  $('find-empty-msg').classList.add('hidden');
 
   container.setAttribute('role', 'listbox');
   container.setAttribute('aria-label', 'Folder contents');
 
-  files.forEach((file) => {
+  files.forEach((file, index) => {
     const item         = document.createElement('div');
     item.className     = 'file-item';
     item.dataset.name  = file.name;
@@ -775,10 +828,19 @@ function renderFiles(files) {
       ? file.linkedAs.map((lnk) => `<span class="file-badge${isProdLink(lnk) ? ' file-badge-prod' : ''}">\u2192 ${escHtml(lnk)}</span>`).join('')
       : '';
 
+    const nameHtml = fileNameHtml(file.name, query);
+    const kindHtml = query
+      ? (file.isDirectory
+        ? '<span class="find-kind">Folder</span>'
+        : '<span class="find-kind find-kind-file">File</span>')
+      : '';
+    item.setAttribute('aria-label', `${file.name}, ${file.isDirectory ? 'folder' : 'file'}`);
+    if (index === currentIndex) item.classList.add('find-current');
+
     if (viewMode === 'list') {
       item.innerHTML = `
         <span class="fi-icon">${icon}</span>
-        <span class="fi-name" title="${escHtml(file.name)}">${escHtml(file.name)}${badgeHtml ? ' ' + badgeHtml : ''}</span>
+        <span class="fi-name" title="${escHtml(file.name)}"><span class="fi-name-text">${nameHtml}</span>${kindHtml}${badgeHtml ? ' ' + badgeHtml : ''}</span>
         <span class="fi-size">${sizeStr}</span>
         <span class="fi-date">${dateStr}</span>
       `;
@@ -786,7 +848,8 @@ function renderFiles(files) {
       item.innerHTML = `
         <span class="fi-icon-large">${icon}</span>
         ${badgeHtml ? `<span class="fi-badges">${badgeHtml}</span>` : ''}
-        <span class="fi-name-grid" title="${escHtml(file.name)}">${escHtml(file.name)}</span>
+        ${kindHtml}
+        <span class="fi-name-grid" title="${escHtml(file.name)}">${nameHtml}</span>
       `;
     }
 
@@ -848,6 +911,7 @@ function activateFileItem(item) {
   const file = currentFiles.find((f) => f.name === item.dataset.name);
   if (!file) return;
   const filePath = remoteChildPath(file.name);
+  closeFindBar({ restoreEditorFocus: false });
   if (file.isDirectory) {
     loadDirectory(filePath, true, true);
     return;
@@ -1056,7 +1120,7 @@ function setViewMode(mode) {
   viewMode = mode;
   $('btn-view-grid').classList.toggle('active', mode === 'grid');
   $('btn-view-list').classList.toggle('active', mode === 'list');
-  renderFiles(currentFiles);
+  renderBrowser();
 }
 
 // Returns true if the symlink name looks production-related
@@ -1357,6 +1421,241 @@ function setRemoteEditorSaving(on) {
   $('editor-backdrop').setAttribute('aria-busy', on ? 'true' : 'false');
 }
 
+function fileNameHtml(name, query) {
+  if (!query) return escHtml(name);
+  return window.appSearch.splitHighlight(name, query).map((part) => {
+    const text = escHtml(part.text);
+    return part.match ? `<mark class="find-hit">${text}</mark>` : text;
+  }).join('');
+}
+
+function findDialogOpen() {
+  return [
+    'preview-backdrop', 'hop-backdrop', 'confirm-backdrop', 'rename-backdrop', 'sudo-backdrop',
+    'elevate-backdrop', 'editor-confirm-backdrop', 'editor-conflict-backdrop',
+  ].some((id) => {
+    const el = $(id);
+    return el && !el.classList.contains('hidden');
+  });
+}
+
+function handleFindKeydown(e) {
+  if (!$('explorer-screen').classList.contains('active')) return;
+  const action = window.appSearch.findBarKeyAction(e, {
+    open: findState.open,
+    inputFocused: document.activeElement === $('find-input'),
+    platform: navigator.platform || '',
+  });
+  if (!action || findDialogOpen()) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (action === 'open') openFindBar();
+  else if (action === 'refocus') refocusFindInput();
+  else if (action === 'close') closeFindBar();
+  else if (action === 'next') stepFind(1);
+  else if (action === 'prev') stepFind(-1);
+}
+
+function openFindBar() {
+  const mode = remoteEditor.open ? 'editor' : 'browser';
+  findState = window.appSearch.openFind(findState, mode);
+  const input = $('find-input');
+  input.value = findState.query;
+  input.placeholder = mode === 'editor' ? 'Find in file' : 'Find in this folder';
+  $('find-bar').classList.toggle('find-in-editor', mode === 'editor');
+  $('find-bar').classList.remove('hidden');
+  applyOpenFind();
+  input.focus();
+  input.select();
+  if (findState.mode === 'editor') {
+    requestAnimationFrame(() => {
+      if (findState.open && findState.mode === 'editor') paintEditorFind(true);
+    });
+  }
+}
+
+function refocusFindInput() {
+  const input = $('find-input');
+  input.focus();
+  input.select();
+}
+
+function closeFindBar(opts) {
+  if (!findState.open) {
+    $('find-bar').classList.add('hidden');
+    return;
+  }
+  const input = $('find-input');
+  if (input) findState = window.appSearch.setFindQuery(findState, input.value);
+  const wasBrowser = findState.mode === 'browser';
+  const restoreEditor = findState.mode === 'editor'
+    && remoteEditor.open
+    && remoteEditor.loaded
+    && (!opts || opts.restoreEditorFocus !== false);
+  findState = window.appSearch.closeFind(findState);
+  findEditorMatches = [];
+  $('find-bar').classList.remove('find-in-editor');
+  $('find-bar').classList.add('hidden');
+  clearEditorHighlights();
+  syncFindButtons();
+  if (wasBrowser && (!opts || opts.rerender !== false)) renderBrowser();
+  if (restoreEditor) $('editor-text').focus();
+}
+
+function onFindInput() {
+  if (!findState.open) return;
+  findState = window.appSearch.setFindQuery(findState, $('find-input').value);
+  applyOpenFind();
+}
+
+function applyOpenFind() {
+  if (findState.mode === 'editor') refreshEditorFind({ jump: true });
+  else renderBrowser();
+}
+
+function updateFindCount(index, count) {
+  const label = window.appSearch.formatMatchStatus(index, count, findState.query);
+  const el = $('find-count');
+  el.textContent = label;
+  el.classList.toggle('is-empty', label === window.appSearch.NO_MATCHES);
+}
+
+function syncFindButtons() {
+  let count = 0;
+  if (findState.open && findState.query) {
+    count = findState.mode === 'editor'
+      ? findEditorMatches.length
+      : window.appSearch.filterDirectoryEntries(currentFiles, findState.query).length;
+  }
+  const enabled = findState.open && count > 0;
+  $('find-prev').disabled = !enabled;
+  $('find-next').disabled = !enabled;
+}
+
+function stepFind(direction) {
+  if (!findState.open || !findState.query) return;
+  if (findState.mode === 'editor') {
+    const area = $('editor-text');
+    findEditorMatches = window.appSearch.findTextMatches(area.value, findState.query);
+    findState.matchIndex = window.appSearch.stepMatchIndex(findState.matchIndex, findEditorMatches.length, direction);
+    paintEditorFind(true);
+    return;
+  }
+  const files = window.appSearch.filterDirectoryEntries(currentFiles, findState.query);
+  findState.matchIndex = window.appSearch.stepMatchIndex(findState.matchIndex, files.length, direction);
+  renderBrowser();
+  const current = $('file-container').querySelector('.file-item.find-current');
+  if (current) current.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function clearEditorHighlights() {
+  const layer = $('editor-match-layer');
+  if (layer) layer.replaceChildren();
+}
+
+function measureEditorCharWidth(style) {
+  const key = `${style.fontFamily}|${style.fontSize}|${style.fontWeight}|${style.letterSpacing}`;
+  if (editorCharWidth.key === key && editorCharWidth.width > 0) return editorCharWidth.width;
+  const probe = document.createElement('span');
+  probe.textContent = '0000000000';
+  probe.style.position = 'absolute';
+  probe.style.visibility = 'hidden';
+  probe.style.whiteSpace = 'pre';
+  probe.style.fontFamily = style.fontFamily;
+  probe.style.fontSize = style.fontSize;
+  probe.style.fontWeight = style.fontWeight;
+  probe.style.letterSpacing = style.letterSpacing;
+  document.body.appendChild(probe);
+  const width = probe.getBoundingClientRect().width / 10;
+  probe.remove();
+  const safe = width > 0 ? width : 8;
+  editorCharWidth = { key, width: safe };
+  return safe;
+}
+
+function editorFindView(area) {
+  const style = getComputedStyle(area);
+  const fontSize = parseFloat(style.fontSize) || 13;
+  let lineHeight = parseFloat(style.lineHeight);
+  if (!Number.isFinite(lineHeight)) lineHeight = fontSize * 1.55;
+  const tabSize = parseInt(style.tabSize, 10);
+  return {
+    scrollTop: area.scrollTop,
+    scrollLeft: area.scrollLeft,
+    clientHeight: area.clientHeight,
+    clientWidth: area.clientWidth,
+    paddingTop: parseFloat(style.paddingTop) || 0,
+    paddingLeft: parseFloat(style.paddingLeft) || 0,
+    lineHeight,
+    charWidth: measureEditorCharWidth(style),
+    tabSize: Number.isFinite(tabSize) && tabSize > 0 ? tabSize : 2,
+  };
+}
+
+function scrollEditorToMatch(area, match) {
+  if (!match) return;
+  const view = editorFindView(area);
+  const pos = window.appSearch.matchVisualPosition(area.value, match.start, view.tabSize);
+  const nextTop = window.appSearch.scrollOffsetForMatch(
+    pos.line, view.scrollTop, view.clientHeight, view.paddingTop, view.lineHeight
+  );
+  const nextLeft = window.appSearch.scrollOffsetForColumn(
+    pos.column, view.scrollLeft, view.clientWidth, view.paddingLeft, view.charWidth
+  );
+  if (nextTop !== area.scrollTop) area.scrollTop = nextTop;
+  if (nextLeft !== area.scrollLeft) area.scrollLeft = nextLeft;
+}
+
+function paintEditorFind(shouldScroll) {
+  const area = $('editor-text');
+  const index = findState.matchIndex;
+  updateFindCount(index, findEditorMatches.length);
+  syncFindButtons();
+  if (!area) return;
+  if (shouldScroll && index >= 0 && findEditorMatches[index]) scrollEditorToMatch(area, findEditorMatches[index]);
+  const layer = $('editor-match-layer');
+  if (!layer) return;
+  const boxes = window.appSearch.layoutMatchHighlights(area.value, findEditorMatches, index, editorFindView(area));
+  layer.replaceChildren();
+  boxes.forEach((box) => {
+    const el = document.createElement('div');
+    el.className = box.current ? 'editor-match current' : 'editor-match';
+    el.style.top = `${box.top}px`;
+    el.style.left = `${box.left}px`;
+    el.style.width = `${box.width}px`;
+    el.style.height = `${box.height}px`;
+    layer.appendChild(el);
+  });
+}
+
+function refreshEditorFind(opts) {
+  const area = $('editor-text');
+  if (!findState.open || findState.mode !== 'editor' || !area || !remoteEditor.loaded) {
+    findEditorMatches = [];
+    if (findState.open && findState.mode === 'editor') {
+      updateFindCount(-1, 0);
+      syncFindButtons();
+    }
+    clearEditorHighlights();
+    return;
+  }
+  const jump = !!(opts && opts.jump);
+  const synced = jump
+    ? {
+      matches: window.appSearch.findTextMatches(area.value, findState.query),
+      index: findState.query ? 0 : -1,
+    }
+    : window.appSearch.syncTextMatches(area.value, findState.query, {
+      matches: findEditorMatches,
+      index: findState.matchIndex,
+    });
+  findEditorMatches = synced.matches;
+  findState.matchIndex = findState.query
+    ? window.appSearch.clampMatchIndex(synced.index, findEditorMatches.length)
+    : -1;
+  paintEditorFind(jump);
+}
+
 function refreshRemoteEditorDirty() {
   const badge = $('editor-dirty');
   if (!remoteEditor.open || !remoteEditor.loaded) {
@@ -1365,6 +1664,7 @@ function refreshRemoteEditorDirty() {
   }
   const dirty = window.editorState.hasUnsavedChanges($('editor-text').value, remoteEditor.baseline);
   badge.classList.toggle('hidden', !dirty);
+  if (findState.open && findState.mode === 'editor') refreshEditorFind({ jump: false });
 }
 
 function showUnsavedDialog() {
@@ -1405,6 +1705,7 @@ function dismissRemoteConflict() {
 }
 
 function closeRemoteEditor(opts) {
+  closeFindBar({ restoreEditorFocus: false });
   const leave = opts && opts.runLeave ? remoteEditor.pendingLeave : null;
   remoteEditor.pendingLeave = null;
   remoteEditor.gen += 1;
@@ -1426,7 +1727,8 @@ function closeRemoteEditor(opts) {
     remoteEditor.statusTimer = null;
   }
   $('editor-text').value = '';
-  $('editor-text').classList.add('hidden');
+  $('editor-text-wrap').classList.add('hidden');
+  clearEditorHighlights();
   $('editor-loading').classList.add('hidden');
   $('editor-load-error').classList.add('hidden');
   $('editor-load-error').textContent = '';
@@ -1486,6 +1788,7 @@ function discardRemoteEditor() {
 }
 
 async function openRemoteEditor(filePath, fileName, fileSize) {
+  closeFindBar({ restoreEditorFocus: false });
   const api = window.editorState;
   const target = currentEditorTarget();
   const gen = ++remoteEditor.gen;
@@ -1518,7 +1821,8 @@ async function openRemoteEditor(filePath, fileName, fileSize) {
   $('editor-path').title = location;
   $('editor-dirty').classList.add('hidden');
   $('editor-text').value = '';
-  $('editor-text').classList.add('hidden');
+  $('editor-text-wrap').classList.add('hidden');
+  clearEditorHighlights();
   $('editor-load-error').textContent = '';
   $('editor-load-error').classList.add('hidden');
   $('editor-loading').classList.remove('hidden');
@@ -1568,7 +1872,7 @@ async function openRemoteEditor(filePath, fileName, fileSize) {
   remoteEditor.mtime = result.mtime;
   remoteEditor.size = result.size;
   remoteEditor.loaded = true;
-  area.classList.remove('hidden');
+  $('editor-text-wrap').classList.remove('hidden');
   refreshRemoteEditorDirty();
   setRemoteEditorSaving(false);
   area.setSelectionRange(0, 0);
@@ -2138,6 +2442,7 @@ async function enterDockerMode(container) {
 
 async function beginDockerMode(container) {
   if (!container || !container.id) return;
+  closeFindBar({ restoreEditorFocus: false, rerender: false });
   if (!dockerMode) preDockerPath = currentPath;
   dockerMode = { id: container.id, name: container.name, image: container.image };
 
@@ -2160,6 +2465,7 @@ async function beginDockerMode(container) {
 function exitDockerMode() {
   leaveEditorThen(() => {
     const returnPath = preDockerPath || '/';
+    closeFindBar({ restoreEditorFocus: false, rerender: false });
     clearDockerChrome();
     closePreview();
     refreshConnectionChrome();

@@ -174,6 +174,11 @@
         <span>This folder is empty</span>
       </div>
 
+      <div id="find-empty-msg" class="overlay-center hidden">
+        <span class="overlay-icon">🔍</span>
+        <span>No matching files or folders</span>
+      </div>
+
       <div id="error-overlay" class="overlay-center hidden">
         <span class="overlay-icon">⚠️</span>
         <span id="error-text">Error loading directory</span>
@@ -343,7 +348,10 @@
         <span>Loading file…</span>
       </div>
       <div id="editor-load-error" class="preview-error hidden"></div>
-      <textarea id="editor-text" class="editor-text hidden" spellcheck="false" wrap="off" autocomplete="off" autocapitalize="off" aria-label="Remote file contents"></textarea>
+      <div id="editor-text-wrap" class="editor-text-wrap hidden">
+        <div id="editor-match-layer" class="editor-match-layer" aria-hidden="true"></div>
+        <textarea id="editor-text" class="editor-text" spellcheck="false" wrap="off" autocomplete="off" autocapitalize="off" aria-label="Remote file contents"></textarea>
+      </div>
     </div>
   </div>
 
@@ -391,7 +399,16 @@
     </div>
   </div>
 
+  <div id="find-bar" class="find-bar hidden" role="search" aria-label="Find">
+    <input id="find-input" class="find-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Find" placeholder="Find in this folder" />
+    <span id="find-count" class="find-count" aria-live="polite"></span>
+    <button type="button" id="find-prev" class="find-btn" title="Previous match (Shift+Enter)" aria-label="Previous match" disabled>&#x25B4;</button>
+    <button type="button" id="find-next" class="find-btn" title="Next match (Enter)" aria-label="Next match" disabled>&#x25BE;</button>
+    <button type="button" id="find-close" class="find-btn find-close" title="Close (Escape)" aria-label="Close search">&#x2715;</button>
+  </div>
+
   <script src="editor-state.js"></script>
+  <script src="search.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
