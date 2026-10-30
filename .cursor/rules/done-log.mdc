@@ -1,0 +1,20 @@
+---
+description: When the user says good to go, record the accepted task in documentation/done.md
+alwaysApply: true
+---
+
+# Finished tasks
+
+When the user says "good to go", the task just finished is accepted. Record it in `documentation/done.md`. Create the file if it is missing.
+
+Put the newest entry first, under `# Done`. Each entry has the task title and what was done.
+
+```markdown
+# Done
+
+## Short task title
+
+What changed, and why, in a few sentences.
+```
+
+Record only the work accepted by that phrase. Leave `documentation/done.md` unchanged until the user says "good to go".

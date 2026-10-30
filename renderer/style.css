@@ -179,6 +179,10 @@ input:focus {
   box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
 }
 input::placeholder { color: var(--text-dim); opacity: 0.55; }
+input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 /* Hide number input spinners */
 input[type="number"]::-webkit-inner-spin-button,
@@ -205,6 +209,13 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
   font-weight: 500;
 }
 .jump-toggle:hover .jump-toggle-label { color: var(--text); }
+.key-toggle { margin-top: -2px; }
+.key-toggle .jump-toggle-label {
+  text-transform: none;
+  letter-spacing: 0;
+}
+#key-pass-backdrop { z-index: 450; }
+#key-pass-backdrop .confirm-modal { max-width: 420px; }
 
 /* Jump host section */
 .jump-section {

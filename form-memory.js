@@ -39,6 +39,7 @@ function sanitizeDirect(direct) {
     username,
     port: normalizePort(direct.port),
     jump,
+    useKey: direct.useKey === true,
   };
 }
 

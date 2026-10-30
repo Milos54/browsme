@@ -1,0 +1,14 @@
+---
+description: Read the SSH Explorer reference before a task, then keep its invariants
+alwaysApply: true
+---
+
+# SSH Explorer
+
+Before searching the repository, read `documentation/about.md`. Then open only the files this task changes.
+
+`taks.txt` is a scratch list. Follow the code when it disagrees with `documentation/about.md`, then update `documentation/about.md` so the reference stays true.
+
+- The bastion on the connect form and Connect to server are different mechanisms.
+- Container file saves use the Docker writer. Host file saves use SFTP.
+- Passwords are never stored in form memory.

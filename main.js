@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const path = require('path');
 const { loadFormMemory, saveFormMemory } = require('./form-memory');
 const { SshNav } = require('./ssh-nav');
+const { resolveAgentSocket } = require('./ssh-keys');
 const {
   assessRemoteChange,
   chooseWriteAccount,
@@ -27,13 +28,55 @@ let mainWindow   = null;
 let sshClient    = null;   // logical server currently being browsed
 let sftpSession  = null;
 
-// SSH agent socket for key-based auth (no password needed on target)
-const agentSocket = process.platform === 'win32'
-  ? '\\\\.\\pipe\\openssh-ssh-agent'
-  : (process.env.SSH_AUTH_SOCK || undefined);
+// SSH agent socket for key-based auth (no password needed on target).
+// Resolved again at connect time so a Finder-launched app still sees the Mac agent.
+function askAuthSecret(prompt) {
+  return new Promise((resolve) => {
+    const requestId = crypto.randomBytes(16).toString('hex');
+    const timer = setTimeout(() => {
+      ipcMain.removeListener('ssh:passphrase-reply', onReply);
+      resolve({ cancelled: true });
+    }, 10 * 60 * 1000);
+    function onReply(_event, payload) {
+      if (!payload || payload.requestId !== requestId) return;
+      clearTimeout(timer);
+      ipcMain.removeListener('ssh:passphrase-reply', onReply);
+      resolve(payload);
+    }
+    ipcMain.on('ssh:passphrase-reply', onReply);
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      clearTimeout(timer);
+      ipcMain.removeListener('ssh:passphrase-reply', onReply);
+      resolve({ cancelled: true });
+      return;
+    }
+    mainWindow.webContents.send('ssh:passphrase-request', {
+      requestId,
+      kind: prompt.kind || 'passphrase',
+      keyLabel: prompt.keyLabel,
+      username: prompt.username,
+      host: prompt.host,
+      wrong: !!prompt.wrong,
+    });
+  });
+}
+
+function askKeyPassphrase(prompt) {
+  return askAuthSecret({ ...prompt, kind: 'passphrase' });
+}
+
+function askAccountPassword(prompt) {
+  return askAuthSecret({ ...prompt, kind: 'account' }).then((payload) => {
+    if (!payload || payload.cancelled) return { cancelled: true };
+    return { password: typeof payload.passphrase === 'string' ? payload.passphrase : '' };
+  });
+}
 
 const sshNav = new SshNav({
-  agentSocket,
+  agentSocket: resolveAgentSocket(),
+  resolveAgentSocket,
+  requestPassphrase: askKeyPassphrase,
+  requestPassword: askAccountPassword,
   onChange(client, sftp) {
     sshClient = client;
     sftpSession = sftp;

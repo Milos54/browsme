@@ -38,6 +38,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   applyLastDirectConnect();
   document.documentElement.dataset.formMemory = 'ready';
   bindConnectForm();
+  bindKeyPassphrase();
   window.addEventListener('beforeunload', flushFormMemoryFromForm);
 });
 
@@ -50,14 +51,19 @@ function bindWindowControls() {
 function bindConnectForm() {
   $('connect-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    await handleConnect();
+    if ($('btn-connect').disabled) return;
+    if (!keyPassphraseOpen()) await handleConnect();
   });
 
   // Jump host toggle
   $('chk-jump').addEventListener('change', (e) => {
     const on = e.target.checked;
     $('jump-section').classList.toggle('hidden', !on);
-    $('password-optional').classList.toggle('hidden', !on);
+    captureDirectConnectFromForm();
+  });
+
+  $('chk-use-key').addEventListener('change', () => {
+    syncUseKeyField();
     captureDirectConnectFromForm();
   });
 
@@ -216,6 +222,7 @@ function bindExplorerControls() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (closeKeyPassphrase()) return;
       if (remoteEditor.open) return;
       closePreview(); closeHopModal(); closeConfirm(); closeSudo(); closeRename();
     }
@@ -238,12 +245,13 @@ async function handleConnect() {
   const password = $('input-password').value;
   const port     = parseInt($('input-port').value, 10) || 22;
   const useJump  = $('chk-jump').checked;
+  const useKey   = $('chk-use-key').checked;
 
   if (!host || !username) {
     showConnectError('Please fill in host and username.');
     return;
   }
-  if (!password && !useJump) {
+  if (!password && !useKey) {
     showConnectError('Please fill in your password.');
     return;
   }
@@ -264,7 +272,14 @@ async function handleConnect() {
   setConnecting(true);
   clearConnectError();
 
-  const result = await window.api.connect({ host, username, password, port, jump });
+  const result = await window.api.connect({
+    host,
+    username,
+    port,
+    jump,
+    password,
+    useKey,
+  });
 
   if (!result.success) {
     setConnecting(false);
@@ -274,7 +289,7 @@ async function handleConnect() {
 
   connectionChain = [{ host, username, port, jump }];
   connectionInfo = connectionChain[0];
-  rememberDirectConnect({ host, username, port, jump });
+  rememberDirectConnect({ host, username, port, jump, useKey });
   if (remoteEditor.open) closeRemoteEditor();
   clearDockerChrome();
   refreshConnectionChrome();
@@ -425,11 +440,12 @@ function serverMemoryKey(info) {
   return `${info.username}@${info.host}:${info.port || 22}`;
 }
 
-function rememberDirectConnect({ host, username, port, jump }) {
+function rememberDirectConnect({ host, username, port, jump, useKey }) {
   lastDirectConnect = {
     host,
     username,
     port: port || 22,
+    useKey: !!useKey,
     jump: jump
       ? { host: jump.host, username: jump.username, port: jump.port || 22 }
       : null,
@@ -444,6 +460,7 @@ function captureDirectConnectFromForm() {
     host: $('input-host').value.trim(),
     username: $('input-username').value.trim(),
     port: parseInt($('input-port').value, 10) || 22,
+    useKey: $('chk-use-key').checked,
     jump: useJump
       ? {
           host: $('jump-host').value.trim(),
@@ -473,6 +490,7 @@ function formMemoryPayload() {
       host: lastDirectConnect.host,
       username: lastDirectConnect.username,
       port: lastDirectConnect.port || 22,
+      useKey: !!lastDirectConnect.useKey,
       jump: lastDirectConnect.jump
         ? {
             host: lastDirectConnect.jump.host,
@@ -533,7 +551,66 @@ function flushFormMemoryFromForm() {
 function setJumpFieldsVisible(on) {
   $('chk-jump').checked = on;
   $('jump-section').classList.toggle('hidden', !on);
-  $('password-optional').classList.toggle('hidden', !on);
+}
+
+function syncUseKeyField() {
+  const useKey = $('chk-use-key').checked;
+  $('input-password').disabled = false;
+  $('password-with-key').classList.toggle('hidden', !useKey);
+}
+
+let keyPassRequestId = '';
+
+function keyPassphraseOpen() {
+  return !$('key-pass-backdrop').classList.contains('hidden');
+}
+
+function bindKeyPassphrase() {
+  window.api.onPassphraseRequest((data) => {
+    const account = data.kind === 'account';
+    keyPassRequestId = data.requestId;
+    $('key-pass-title').textContent = account
+      ? `Password for ${data.username}@${data.host}`
+      : `Passphrase for ${data.keyLabel}`;
+    $('key-pass-note').textContent = account
+      ? 'The server asked for your account password.'
+      : 'Unlocks this key on your computer.';
+    $('key-pass-ok-text').textContent = account ? 'Continue' : 'Unlock';
+    $('key-pass-error').textContent = account ? 'Wrong password.' : 'Wrong passphrase.';
+    $('key-pass-input').value = '';
+    $('key-pass-error').classList.toggle('hidden', !data.wrong);
+    $('key-pass-backdrop').classList.remove('hidden');
+    setTimeout(() => $('key-pass-input').focus(), 30);
+  });
+  $('key-pass-ok').addEventListener('click', submitKeyPassphrase);
+  $('key-pass-cancel').addEventListener('click', () => closeKeyPassphrase());
+  $('key-pass-backdrop').addEventListener('click', (e) => {
+    if (e.target === $('key-pass-backdrop')) closeKeyPassphrase();
+  });
+  $('key-pass-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitKeyPassphrase();
+    }
+  });
+}
+
+function submitKeyPassphrase() {
+  if (!keyPassphraseOpen()) return;
+  const requestId = keyPassRequestId;
+  const passphrase = $('key-pass-input').value;
+  $('key-pass-backdrop').classList.add('hidden');
+  keyPassRequestId = '';
+  window.api.replyPassphrase({ requestId, passphrase });
+}
+
+function closeKeyPassphrase() {
+  if (!keyPassphraseOpen()) return false;
+  const requestId = keyPassRequestId;
+  $('key-pass-backdrop').classList.add('hidden');
+  keyPassRequestId = '';
+  window.api.replyPassphrase({ requestId, cancelled: true });
+  return true;
 }
 
 function applyLastDirectConnect() {
@@ -541,11 +618,17 @@ function applyLastDirectConnect() {
   $('jump-password').value = '';
 
   const saved = lastDirectConnect;
-  if (!saved) return;
+  if (!saved) {
+    $('chk-use-key').checked = false;
+    syncUseKeyField();
+    return;
+  }
 
   $('input-host').value = saved.host;
   $('input-username').value = saved.username;
   $('input-port').value = String(saved.port || 22);
+  $('chk-use-key').checked = !!saved.useKey;
+  syncUseKeyField();
 
   if (saved.jump) {
     setJumpFieldsVisible(true);

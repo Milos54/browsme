@@ -83,10 +83,14 @@
           <div class="field-group">
             <label for="input-password">
               Password
-              <span id="password-optional" class="field-optional hidden">(optional — uses SSH key if blank)</span>
+              <span id="password-with-key" class="field-optional hidden">if the server also asks for it</span>
             </label>
             <input id="input-password" type="password" placeholder="••••••••" />
           </div>
+          <label class="jump-toggle key-toggle">
+            <input type="checkbox" id="chk-use-key" />
+            <span class="jump-toggle-label">Use SSH key</span>
+          </label>
 
           <div id="connect-error" class="error-msg hidden"></div>
 
@@ -280,6 +284,23 @@
           <span id="elevate-ok-text">Save</span>
           <span id="elevate-spinner" class="spinner hidden"></span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SSH key passphrase ──────────────────────────────────────────────── -->
+  <div id="key-pass-backdrop" class="confirm-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="key-pass-title">
+    <div class="confirm-modal" role="document">
+      <div class="confirm-icon" aria-hidden="true">🔑</div>
+      <div id="key-pass-title" class="confirm-title">Passphrase for key</div>
+      <div id="key-pass-note" class="confirm-msg">Unlocks this key on your computer.</div>
+      <div class="field-group">
+        <input id="key-pass-input" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+      <div id="key-pass-error" class="error-msg hidden">Wrong passphrase.</div>
+      <div class="confirm-btns">
+        <button type="button" id="key-pass-cancel" class="confirm-btn-cancel">Cancel</button>
+        <button type="button" id="key-pass-ok" class="confirm-btn-save"><span id="key-pass-ok-text">Unlock</span></button>
       </div>
     </div>
   </div>

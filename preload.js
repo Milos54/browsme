@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('api', {
 
   // SSH / SFTP
   connect:    (opts)  => ipcRenderer.invoke('ssh:connect', opts),
+  onPassphraseRequest: (cb) => ipcRenderer.on('ssh:passphrase-request', (_event, data) => cb(data)),
+  replyPassphrase: (payload) => ipcRenderer.send('ssh:passphrase-reply', payload),
   disconnect: ()      => ipcRenderer.invoke('ssh:disconnect'),
   exit:       ()      => ipcRenderer.invoke('ssh:exit'),
   hop:        (opts)  => ipcRenderer.invoke('ssh:hop', opts),

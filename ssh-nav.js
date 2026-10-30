@@ -1,6 +1,12 @@
 'use strict';
 
 const { Client } = require('ssh2');
+const {
+  loadAuthPlan,
+  unlockPrivateKey,
+  isProbeAcceptedError,
+  friendlyAuthError,
+} = require('./ssh-keys');
 
 const READY_TIMEOUT_MS = 15000;
 
@@ -19,6 +25,12 @@ class SshNav {
   constructor(options = {}) {
     this.Client = options.Client || Client;
     this.agentSocket = options.agentSocket;
+    this.sshDir = options.sshDir;
+    this.home = options.home;
+    this.loadAuthPlan = options.loadAuthPlan || loadAuthPlan;
+    this.requestPassphrase = options.requestPassphrase || (async () => ({ cancelled: true }));
+    this.requestPassword = options.requestPassword || (async () => ({ cancelled: true }));
+    this.resolveAgentSocket = options.resolveAgentSocket || (() => this.agentSocket);
     this.onChange = typeof options.onChange === 'function' ? options.onChange : () => {};
     this.jumpClient = null;
     this.sessions = [];
@@ -27,7 +39,7 @@ class SshNav {
     this.generation = 0;
   }
 
-  connect({ host, port, username, password, jump }) {
+  connect({ host, port, username, password, jump, useKey }) {
     return new Promise((resolve) => {
       this.cleanup();
       const gen = this.generation;
@@ -66,6 +78,32 @@ class SshNav {
       };
 
       if (!jump) {
+        if (useKey) {
+          this.attemptKeyLogin({
+            host,
+            port: targetPort,
+            username,
+            password,
+            gen,
+            openTransport: () => Promise.resolve({ sock: null }),
+          }).then((result) => {
+            if (settled || this.generation !== gen) {
+              destroyClient(result && result.client);
+              destroyStream(result && result.sock);
+              if (!settled) finish({ success: false, error: 'Not connected to any server.' });
+              return;
+            }
+            if (!result.ok) {
+              finish({ success: false, error: result.error });
+              return;
+            }
+            establish(result.client, result.sock || null);
+          }).catch((err) => {
+            if (!settled) finish({ success: false, error: err.message });
+          });
+          return;
+        }
+
         const client = new this.Client();
         this.silence(client);
         const timeout = setTimeout(() => {
@@ -138,6 +176,51 @@ class SshNav {
           if (err) {
             this.cleanup();
             finish({ success: false, error: `Tunnel error: ${err.message}` });
+            return;
+          }
+
+          if (useKey) {
+            let firstSock = stream;
+            this.attemptKeyLogin({
+              host,
+              port: targetPort,
+              username,
+              password,
+              gen,
+              openTransport: () => {
+                if (firstSock) {
+                  const sock = firstSock;
+                  firstSock = null;
+                  return Promise.resolve({ sock });
+                }
+                return new Promise((resolve) => {
+                  if (settled || this.generation !== gen || this.jumpClient !== jClient) {
+                    resolve({ error: 'Not connected to any server.' });
+                    return;
+                  }
+                  jClient.forwardOut('127.0.0.1', 0, host, targetPort, (fwdErr, next) => {
+                    if (fwdErr) resolve({ error: `Tunnel error: ${fwdErr.message}` });
+                    else resolve({ sock: next });
+                  });
+                });
+              },
+            }).then((result) => {
+              if (settled || this.generation !== gen) {
+                destroyClient(result && result.client);
+                destroyStream(result && result.sock);
+                if (!settled) finish({ success: false, error: 'Not connected to any server.' });
+                return;
+              }
+              if (!result.ok) {
+                this.cleanup();
+                finish({ success: false, error: prefixTargetError(result.error) });
+                return;
+              }
+              establish(result.client, result.sock || null);
+            }).catch((keyErr) => {
+              if (this.generation === gen) this.cleanup();
+              if (!settled) finish({ success: false, error: prefixTargetError(keyErr.message) });
+            });
             return;
           }
 
@@ -514,12 +597,318 @@ class SshNav {
     client.on('error', () => {});
   }
 
+  attemptKeyLogin({ host, port, username, password, gen, openTransport }) {
+    const portNum = port || 22;
+    const agentSocket = typeof this.resolveAgentSocket === 'function'
+      ? this.resolveAgentSocket()
+      : this.agentSocket;
+    return this.loadAuthPlan({
+      host,
+      username,
+      port: portNum,
+      sshDir: this.sshDir,
+      home: this.home,
+      agentSocket,
+    }).then((plan) => {
+      if (!plan.attempts.length) {
+        return { ok: false, error: plan.error || 'No SSH key found for this host. ssh checks the agent, IdentityFile in ~/.ssh/config, and the default keys in ~/.ssh.' };
+      }
+      const step = (attempts, accountPassword) => this.oneKeyConnection({
+        host,
+        port: portNum,
+        username,
+        accountPassword,
+        gen,
+        openTransport,
+        attempts,
+      }).then((result) => {
+        if (result.type === 'ready') return { ok: true, client: result.client, sock: result.sock };
+        if (result.type === 'cancelled') {
+          const error = result.reason === 'password'
+            ? 'Password entry cancelled.'
+            : 'Passphrase entry cancelled.';
+          return { ok: false, error };
+        }
+        if (result.type === 'stale') return { ok: false, error: 'Not connected to any server.' };
+        if (result.type !== 'need-passphrase') {
+          return { ok: false, error: result.error || 'The server did not accept an SSH key from this computer.' };
+        }
+        const passwordForRetry = result.accountPassword || accountPassword;
+        return unlockPrivateKey(result.attempt.pem, (prompt) => {
+          if (this.generation !== gen) return Promise.resolve({ cancelled: true });
+          return this.requestPassphrase(prompt);
+        }, result.attempt.displayPath).then((unlocked) => {
+          if (this.generation !== gen) {
+            return { ok: false, error: 'Not connected to any server.' };
+          }
+          if (unlocked.cancelled) return { ok: false, error: 'Passphrase entry cancelled.' };
+          return step([{
+            kind: 'private',
+            key: unlocked.key,
+            path: result.attempt.path,
+            displayPath: result.attempt.displayPath,
+          }], passwordForRetry);
+        });
+      });
+      return step(plan.attempts, typeof password === 'string' ? password : '');
+    }).catch((err) => ({ ok: false, error: err.message }));
+  }
+
+  oneKeyConnection({ host, port, username, accountPassword, gen, openTransport, attempts }) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+
+      Promise.resolve()
+        .then(() => openTransport())
+        .then((transport) => {
+          if (settled) {
+            destroyStream(transport && transport.sock);
+            return;
+          }
+          if (!transport || transport.error) {
+            done({ type: 'fail', error: (transport && transport.error) || 'Connection failed.' });
+            return;
+          }
+          if (this.generation !== gen) {
+            destroyStream(transport.sock);
+            done({ type: 'stale' });
+            return;
+          }
+          this.finishKeySocket({
+            host,
+            port,
+            username,
+            accountPassword,
+            gen,
+            sock: transport.sock || null,
+            attempts,
+            done,
+          });
+        })
+        .catch((err) => {
+          done({ type: 'fail', error: err.message });
+        });
+    });
+  }
+
+  finishKeySocket({ host, port, username, accountPassword, gen, sock, attempts, done }) {
+    const client = new this.Client();
+    this.silence(client);
+    const state = { abandoned: false, cancelled: false, cancelReason: '', current: null };
+    let index = 0;
+    let lastMethod = '';
+    let storedPassword = typeof accountPassword === 'string' ? accountPassword : '';
+    let storedPasswordUsed = false;
+    let passwordAsks = 0;
+    let timer = null;
+    const pauseTimer = () => clearTimeout(timer);
+    const armTimer = () => {
+      pauseTimer();
+      timer = setTimeout(() => {
+        state.abandoned = true;
+        destroyClient(client);
+        destroyStream(sock);
+        done({ type: 'fail', error: 'Connection timed out after 15 seconds' });
+      }, READY_TIMEOUT_MS);
+    };
+
+    const allows = (methodsLeft, name) => !Array.isArray(methodsLeft) || methodsLeft.indexOf(name) !== -1;
+    const accountMethod = (methodsLeft) => {
+      if (!Array.isArray(methodsLeft) || methodsLeft.indexOf('password') !== -1) return 'password';
+      if (methodsLeft.indexOf('keyboard-interactive') !== -1) return 'keyboard-interactive';
+      return '';
+    };
+    const offerAccountPassword = (methodsLeft, callback) => {
+      const method = accountMethod(methodsLeft);
+      if (!method || passwordAsks >= 4) return false;
+      const send = (secret) => {
+        if (state.abandoned || this.generation !== gen) return;
+        passwordAsks += 1;
+        storedPassword = secret;
+        lastMethod = 'password';
+        state.current = { kind: 'password' };
+        if (method === 'keyboard-interactive') {
+          callback({
+            type: 'keyboard-interactive',
+            username,
+            prompt(_name, _instructions, _lang, prompts, finish) {
+              const answers = (Array.isArray(prompts) ? prompts : []).map(() => secret);
+              finish(answers);
+            },
+          });
+          return;
+        }
+        callback({ type: 'password', username, password: secret });
+      };
+      if (storedPassword && !storedPasswordUsed) {
+        storedPasswordUsed = true;
+        send(storedPassword);
+        return true;
+      }
+      pauseTimer();
+      Promise.resolve(this.requestPassword({
+        username,
+        host,
+        wrong: passwordAsks > 0,
+      })).then((answer) => {
+        if (state.abandoned || this.generation !== gen) return;
+        if (!answer || answer.cancelled) {
+          state.cancelled = true;
+          state.cancelReason = 'password';
+          state.abandoned = true;
+          callback(false);
+          return;
+        }
+        armTimer();
+        send(typeof answer.password === 'string' ? answer.password : '');
+      }).catch(() => {
+        state.cancelled = true;
+        state.cancelReason = 'password';
+        state.abandoned = true;
+        callback(false);
+      });
+      return true;
+    };
+    const offerNextKey = (callback) => {
+      while (index < attempts.length) {
+        const attempt = attempts[index];
+        index += 1;
+        state.current = attempt;
+        lastMethod = 'publickey';
+        if (attempt.kind === 'agent') {
+          callback({ type: 'agent', username, agent: attempt.agent });
+          return true;
+        }
+        if (attempt.kind === 'probe') {
+          callback({ type: 'publickey', username, key: attempt.probeKey });
+          return true;
+        }
+        if (attempt.kind === 'private') {
+          callback({ type: 'publickey', username, key: attempt.key });
+          return true;
+        }
+        if (attempt.kind === 'locked') {
+          pauseTimer();
+          unlockPrivateKey(attempt.pem, (prompt) => {
+            if (this.generation !== gen || state.abandoned) return Promise.resolve({ cancelled: true });
+            return this.requestPassphrase(prompt);
+          }, attempt.displayPath).then((unlocked) => {
+            if (state.abandoned || this.generation !== gen) return;
+            if (unlocked.cancelled) {
+              state.cancelled = true;
+              state.cancelReason = 'passphrase';
+              state.abandoned = true;
+              callback(false);
+              return;
+            }
+            armTimer();
+            callback({ type: 'publickey', username, key: unlocked.key });
+          }).catch(() => {
+            state.cancelled = true;
+            state.cancelReason = 'passphrase';
+            state.abandoned = true;
+            callback(false);
+          });
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const authHandler = (methodsLeft, partial, callback) => {
+      if (state.abandoned || this.generation !== gen) return false;
+      if (partial && lastMethod === 'publickey' && accountMethod(methodsLeft)) {
+        if (offerAccountPassword(methodsLeft, callback)) return;
+      }
+      if (partial && lastMethod === 'password' && allows(methodsLeft, 'publickey')) index = 0;
+      if (allows(methodsLeft, 'publickey') && offerNextKey(callback)) return;
+      if (offerAccountPassword(methodsLeft, callback)) return;
+      return false;
+    };
+
+    const onError = (err) => {
+      if (err && err.level === 'agent' && !state.abandoned && !state.cancelled) return;
+      pauseTimer();
+      client.removeListener('error', onError);
+      if (state.cancelled) {
+        state.abandoned = true;
+        destroyClient(client);
+        destroyStream(sock);
+        done({ type: 'cancelled', reason: state.cancelReason || 'passphrase' });
+        return;
+      }
+      if (state.current && state.current.kind === 'probe' && isProbeAcceptedError(err)) {
+        state.abandoned = true;
+        const attempt = state.current;
+        destroyClient(client);
+        destroyStream(sock);
+        done({ type: 'need-passphrase', attempt, accountPassword: storedPassword });
+        return;
+      }
+      state.abandoned = true;
+      destroyClient(client);
+      destroyStream(sock);
+      done({ type: 'fail', error: friendlyAuthError(err && err.message) });
+    };
+
+    client.on('error', onError);
+    client.on('ready', () => {
+      pauseTimer();
+      client.removeListener('error', onError);
+      if (this.generation !== gen) {
+        state.abandoned = true;
+        destroyClient(client);
+        destroyStream(sock);
+        done({ type: 'stale' });
+        return;
+      }
+      done({ type: 'ready', client, sock });
+    });
+
+    armTimer();
+    try {
+      const opts = {
+        host,
+        port,
+        username,
+        readyTimeout: 0,
+        authHandler,
+      };
+      if (sock) opts.sock = sock;
+      client.connect(opts);
+    } catch (err) {
+      pauseTimer();
+      client.removeListener('error', onError);
+      destroyClient(client);
+      destroyStream(sock);
+      done({ type: 'fail', error: err.message });
+    }
+  }
+
   buildConnectOpts(host, port, username, password, extra = {}) {
     const opts = { host, port: port || 22, username, readyTimeout: READY_TIMEOUT_MS, ...extra };
-    if (password) opts.password = password;
-    else if (this.agentSocket) opts.agent = this.agentSocket;
+    if (password) {
+      opts.password = password;
+      delete opts.agent;
+    } else {
+      const socket = typeof this.resolveAgentSocket === 'function'
+        ? this.resolveAgentSocket()
+        : this.agentSocket;
+      if (socket) opts.agent = socket;
+    }
     return opts;
   }
+}
+
+function prefixTargetError(message) {
+  const text = message || 'The server did not accept an SSH key from this computer.';
+  if (/^(Target|Tunnel error):/.test(text)) return text;
+  return `Target: ${text}`;
 }
 
 function destroyClient(client) {

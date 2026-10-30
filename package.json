@@ -28,6 +28,7 @@
       "main.js",
       "preload.js",
       "ssh-nav.js",
+      "ssh-keys.js",
       "docker-files.js",
       "form-memory.js",
       "renderer/**",
